@@ -75,3 +75,28 @@ def test_player_bar_status(qapp):
     bar = PlayerBar()
     bar.set_status("正在朗读：第一章")
     assert bar._status.text() == "正在朗读：第一章"
+
+
+from ui.main_window import MainWindow
+
+
+def test_main_window_constructs(qapp):
+    win = MainWindow()
+    assert win.windowTitle() == "小说阅读听书"
+    assert win._reader is not None
+    assert win._chapter_panel is not None
+    assert win._player_bar is not None
+
+
+def test_main_window_open_file_flow(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    book = tmp_path / "novel.txt"
+    book.write_text("第一章 风起\n内容甲。\n第二章 云涌\n内容乙。", encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(book), "txt")))
+    win = MainWindow()
+    win.open_file()
+    assert win._chapter_panel.current_index() == 0
+    assert len(win._chapters) == 2
+    assert win._chapter_panel._list.count() == 2
+    assert "内容甲" in win._reader.toHtml()

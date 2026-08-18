@@ -48,6 +48,9 @@ class _SynthesisWorker(QThread):
                     if self._cancel:
                         break
                     self.error_occurred.emit(str(exc))
+                    # 错误也要发出终态信号：否则引擎的 _worker_done 恒为 False，
+                    # 下一次 EndOfMedia 会一直等待，播放永久卡死无法排空
+                    self.all_done.emit(self._start_index + len(self._sentences))
                     return
                 if self._cancel:
                     break
@@ -112,7 +115,12 @@ class TtsEngine(QObject):
         self._player.stop()
         if self._worker is not None:
             self._worker.cancel()
-            self._worker.wait(1500)
+            if not self._worker.wait(1500):
+                # 合成线程可能卡在网络调用中未及时退出：断开其信号，防止
+                # 迟到的信号污染下一次播放会话
+                self._worker.sentence_ready.disconnect(self._on_sentence_ready)
+                self._worker.all_done.disconnect(self._on_all_done)
+                self._worker.error_occurred.disconnect(self.error)
             self._worker = None
         self._ready.clear()
         self._next_index = 0

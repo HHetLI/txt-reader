@@ -100,3 +100,54 @@ def test_main_window_open_file_flow(qapp, tmp_path, monkeypatch):
     assert len(win._chapters) == 2
     assert win._chapter_panel._list.count() == 2
     assert "内容甲" in win._reader.toHtml()
+
+
+def test_open_file_switching_book_stops_engine(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    import core.progress_store
+
+    book_a = tmp_path / "book_a.txt"
+    book_a.write_text("第一章 风起\n内容甲。\n第二章 云涌\n内容乙。", encoding="utf-8")
+    book_b = tmp_path / "book_b.txt"
+    book_b.write_text("第一章 新书\n内容丙。\n第二章 新章\n内容丁。", encoding="utf-8")
+    monkeypatch.setattr(core.progress_store, "_store_path",
+                        lambda: tmp_path / "progress.json")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(book_a), "txt")))
+    win = MainWindow()
+    win.open_file()
+    # 开始播放 A（真实 TTS 网络调用，离线/失败也不影响断言）
+    win._on_play_toggled()
+    assert win._engine.has_session() is True
+    monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(book_b), "txt")))
+    win.open_file()
+    assert win._engine.has_session() is False
+    assert win._book_path == str(book_b.resolve())
+
+
+def test_open_file_clamps_out_of_range_progress(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    import core.progress_store
+    import ui.main_window
+
+    book = tmp_path / "novel.txt"
+    book.write_text("第一章 风起\n内容甲。\n第二章 云涌\n内容乙。", encoding="utf-8")
+    book_key = str(book.resolve())
+    monkeypatch.setattr(core.progress_store, "_store_path",
+                        lambda: tmp_path / "progress.json")
+    monkeypatch.setattr(
+        core.progress_store, "load_progress",
+        lambda: {book_key: {"chapter": 999, "scroll": 0}})
+    # main_window 通过 `from core.progress_store import load_progress` 在导入时
+    # 绑定了自己的引用，必须同时替换，open_file 内才会读到 mock 数据
+    monkeypatch.setattr(
+        ui.main_window, "load_progress",
+        lambda: {book_key: {"chapter": 999, "scroll": 0}})
+    monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(book), "txt")))
+    win = MainWindow()
+    win.open_file()  # 不应抛出 IndexError
+    assert win._chapter_panel.current_index() == 1

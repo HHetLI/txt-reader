@@ -89,10 +89,13 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "打开失败", f"无法读取文件：\n{exc}")
             return
         self._chapters = split_chapters(text)
+        # 切换书本时停止旧播放会话，防止 A 书的引擎状态泄漏到 B 书
+        self._engine.stop()
         self._book_path = str(Path(path).resolve())
         self._chapter_panel.set_chapters([c["title"] for c in self._chapters])
         progress = load_progress().get(self._book_path, {})
         index = progress.get("chapter", 0)
+        index = max(0, min(index, len(self._chapters) - 1))
         self._chapter_panel.select_chapter(index)
         self._show_chapter(index)
         self._reader.restore_scroll(progress.get("scroll", 0))

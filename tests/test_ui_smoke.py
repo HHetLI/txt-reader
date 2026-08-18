@@ -51,3 +51,27 @@ def test_chapter_panel_select_chapter_silent(qapp):
     panel._list.setCurrentRow(2)
     assert spy.count() == 1
     assert spy.at(0)[0] == 2
+
+
+from ui.player_bar import PlayerBar
+
+
+def test_player_bar_defaults(qapp):
+    bar = PlayerBar()
+    assert bar.voice() == "zh-CN-XiaoxiaoNeural"
+    assert bar.rate() == "+0%"
+
+
+def test_player_bar_voice_change_signal(qapp):
+    from PySide6.QtTest import QSignalSpy
+    bar = PlayerBar()
+    spy = QSignalSpy(bar.voice_changed)
+    bar._voice.setCurrentIndex(1)
+    assert spy.count() == 1
+    assert spy.at(0)[0] == "zh-CN-YunxiNeural"
+
+
+def test_player_bar_status(qapp):
+    bar = PlayerBar()
+    bar.set_status("正在朗读：第一章")
+    assert bar._status.text() == "正在朗读：第一章"

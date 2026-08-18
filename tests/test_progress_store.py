@@ -36,3 +36,10 @@ def test_save_keeps_other_books():
 def test_corrupted_json_returns_empty(tmp_path):
     (tmp_path / "progress.json").write_text("{not json", encoding="utf-8")
     assert progress_store.load_progress() == {}
+
+
+def test_save_is_atomic_no_leftover_temp(tmp_path):
+    progress_store.save_progress("/x/a.txt", 3, 120)
+    assert not (tmp_path / "progress.json.tmp").exists()
+    saved = json.loads((tmp_path / "progress.json").read_text(encoding="utf-8"))
+    assert saved == {"/x/a.txt": {"chapter": 3, "scroll": 120}}

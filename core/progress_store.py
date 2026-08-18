@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 
@@ -22,4 +23,6 @@ def save_progress(book_path: str, chapter: int, scroll: int) -> None:
     data[book_path] = {"chapter": chapter, "scroll": scroll}
     path = _store_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)

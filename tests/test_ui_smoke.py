@@ -39,3 +39,15 @@ def test_chapter_panel_signal(qapp):
     panel._list.setCurrentRow(1)
     assert spy.count() == 1
     assert spy.at(0)[0] == 1
+
+
+def test_chapter_panel_select_chapter_silent(qapp):
+    from PySide6.QtTest import QSignalSpy
+    panel = ChapterPanel()
+    spy = QSignalSpy(panel.chapter_selected)
+    panel.set_chapters(["a", "b", "c"])
+    panel.select_chapter(1)
+    assert spy.count() == 0
+    panel._list.setCurrentRow(2)
+    assert spy.count() == 1
+    assert spy.at(0)[0] == 2

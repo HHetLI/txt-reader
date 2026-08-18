@@ -35,7 +35,9 @@ class ChapterPanel(QWidget):
         self._list.addItems(titles)
 
     def select_chapter(self, index: int) -> None:
+        self._list.blockSignals(True)
         self._list.setCurrentRow(index)
+        self._list.blockSignals(False)
 
     def current_index(self) -> int:
         return self._list.currentRow()

@@ -64,3 +64,33 @@ def test_index_backend_availability(tmp_path):
     backend = IndexTTSBackend(model_dir=tmp_path / "nonexistent")
     assert not backend.is_available()
     assert not backend.is_loaded()
+
+
+def test_load_after_cancel_resets_flag(monkeypatch):
+    """Finding: cancel_load() 后同一实例再次 load() 必须重置取消标志，
+    越过首个检查点（异常来自 import 失败，而非"已取消"）。"""
+    IndexTTSBackend._tts = None  # 防御：确保类级单例为空
+    backend = IndexTTSBackend(model_dir=Path("models/indextts"))
+    assert not backend.is_loaded()
+
+    backend.cancel_load()
+    assert backend._load_cancelled is True
+
+    # 模型可用（避免任何可用性短路），但 indextts import 抛哨兵异常
+    monkeypatch.setattr(IndexTTSBackend, "is_available", lambda self: True)
+
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "indextts" or name.startswith("indextts."):
+            raise ImportError("sentinel-import-error")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(TTSBackendError) as exc_info:
+        backend.load()
+    # 关键断言：已越过首个取消检查点 → 异常来自 import 失败，而非"已取消"
+    assert "已取消" not in str(exc_info.value)
+    assert backend._load_cancelled is False

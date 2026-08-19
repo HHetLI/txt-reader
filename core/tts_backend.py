@@ -89,6 +89,8 @@ class IndexTTSBackend:
         with self._load_lock:
             if IndexTTSBackend._tts is not None:
                 return
+            # 新加载尝试应允许重试（取消标志仅针对单次加载，须在首个检查点前重置）
+            self._load_cancelled = False
             if self._load_cancelled:
                 raise TTSBackendError("IndexTTS 模型加载已取消")
             try:

@@ -108,6 +108,11 @@ class TtsEngine(QObject):
         self._ready: dict[int, str] = {}
         self._next_index = 0
         self._worker_done = False
+        # 退役 worker：仍在运行（网络合成中）的旧线程保留引用直到自然结束，
+        # 防止被 GC 回收时 QThread 仍在运行而崩溃（Qt 未定义行为）。
+        self._retired_workers: list[_SynthesisWorker] = []
+        # 代际令牌：每次启动新会话递增；旧代际 worker 的迟到信号因令牌不匹配被丢弃
+        self._generation = 0
 
         self._chapters: list[dict] = []
         self._chapter_index = 0
@@ -115,6 +120,33 @@ class TtsEngine(QObject):
 
         self._voice = "zh-CN-XiaoxiaoNeural"
         self._rate = "+0%"
+
+    def __del__(self) -> None:
+        """析构保护：确保所有 worker 线程已结束再释放对象。
+
+        QThread 对象被 GC 回收时若线程仍在运行会崩溃（0xc0000409）。
+        正常路径由 stop() 的 wait 保证；此处兜底覆盖未调用 stop 直接
+        丢弃引擎的场景（如异常退出），循环等待直到线程结束。
+        """
+        try:
+            deadline = 15.0
+            import time as _time
+            start = _time.monotonic()
+            while _time.monotonic() - start < deadline:
+                alive = False
+                for w in list(self._retired_workers):
+                    if not w.isFinished():
+                        w.wait(500)
+                        if not w.isFinished():
+                            alive = True
+                if self._worker is not None and not self._worker.isFinished():
+                    self._worker.wait(500)
+                    if not self._worker.isFinished():
+                        alive = True
+                if not alive:
+                    break
+        except Exception:
+            pass
 
     # ---------- 对外 API ----------
 
@@ -144,22 +176,48 @@ class TtsEngine(QObject):
     def stop(self) -> None:
         self._player.stop()
         if self._worker is not None:
-            self._worker.cancel()
-            if not self._worker.wait(1500):
-                # 合成线程可能卡在网络调用中未及时退出：断开其信号，防止
-                # 迟到的信号污染下一次播放会话
-                self._worker.sentence_ready.disconnect(self._on_sentence_ready)
-                self._worker.all_done.disconnect(self._on_all_done)
-                self._worker.error_occurred.disconnect(self.error)
-                # 线程仍在运行：解除父子关系，等线程结束后再销毁，避免析构崩溃
-                self._worker.setParent(None)
-                self._worker.finished.connect(self._worker.deleteLater)
+            self._retire_worker(self._worker)
             self._worker = None
         self._ready.clear()
         self._next_index = 0
         self._worker_done = False
         self._cleanup_temp()
         self.playing.emit(False)
+
+    def _retire_worker(self, worker: _SynthesisWorker) -> None:
+        """退役一个 worker：断开信号、请求取消、同步等待线程结束。
+
+        这是线程安全的唯一路径：QThread 对象在被 GC 回收时若线程仍在
+        运行（run() 中访问 self._sentences/_out_dir），shiboken 销毁 C++
+        对象会导致崩溃（0xc0000409，实测复现）。断开信号防污染、cancel
+        请求终止、wait 同步等待线程真正结束后才允许引用被释放。
+        """
+        try:
+            # 信号连接使用 lambda（绑定代际令牌），需用无参 disconnect 断开全部连接
+            worker.sentence_ready.disconnect()
+            worker.all_done.disconnect()
+            worker.error_occurred.disconnect()
+            worker.fatal_error.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        worker.cancel()
+        # 同步等待线程结束（合成是网络 IO，cancel 在句间检查，单句 <1s，
+        # 3s 上限足够；若极端超时，保留引用到线程自然结束，绝不放行 GC）
+        if not worker.wait(3000):
+            self._retired_workers.append(worker)
+            worker.finished.connect(
+                lambda w=worker: self._drop_retired_worker(w))
+
+    def _drop_retired_worker(self, worker: _SynthesisWorker) -> None:
+        """退役线程结束：从保留列表移除，允许 Qt 安全回收该线程对象。
+
+        线程已在 _retire_worker 中 wait 结束；此处移除引用（finished 信号
+        可能因事件循环退出未及时到达，故清理同时依赖引用列表生命周期）。
+        """
+        try:
+            self._retired_workers.remove(worker)
+        except ValueError:
+            pass
 
     def next_chapter(self) -> None:
         if self._chapter_index + 1 < len(self._chapters):
@@ -201,14 +259,21 @@ class TtsEngine(QObject):
         self._ready = {}
         self._next_index = start_sentence
         self._worker_done = False
+        self._generation += 1
+        generation = self._generation
         self._worker = _SynthesisWorker(
             remainder, self._voice, self._rate, self._out_dir,
             start_index=start_sentence, parent=self,
         )
-        self._worker.sentence_ready.connect(self._on_sentence_ready)
-        self._worker.all_done.connect(self._on_all_done)
-        self._worker.error_occurred.connect(self.error)
-        self._worker.fatal_error.connect(self._on_fatal_error)
+        # 代际令牌：迟到的旧代际信号（如已退役 worker 的排队消息）因令牌不匹配被丢弃
+        self._worker.sentence_ready.connect(
+            lambda i, p, g=generation: self._on_sentence_ready(i, p, g))
+        self._worker.all_done.connect(
+            lambda total, g=generation: self._on_all_done(total, g))
+        self._worker.error_occurred.connect(
+            lambda msg, g=generation: self._on_error(msg, g))
+        self._worker.fatal_error.connect(
+            lambda msg, g=generation: self._on_fatal_error(msg, g))
         self._worker.start()
         self.playing.emit(True)
 
@@ -218,7 +283,9 @@ class TtsEngine(QObject):
         start = max(0, self._next_index - 1)
         self._start_chapter(self._chapter_index, start_sentence=start)
 
-    def _on_sentence_ready(self, index: int, path: str) -> None:
+    def _on_sentence_ready(self, index: int, path: str, generation: int) -> None:
+        if generation != self._generation:
+            return  # 旧代际 worker 的迟到信号，丢弃
         self._ready[index] = path
         # 若当前未在播放且未处于暂停（含播放器空闲/刚启动），立即播下一个就绪句；
         # 暂停中保持暂停，等用户恢复
@@ -234,15 +301,24 @@ class TtsEngine(QObject):
                 return k
         return None
 
-    def _on_all_done(self, total: int) -> None:
+    def _on_all_done(self, total: int, generation: int) -> None:
+        if generation != self._generation:
+            return  # 旧代际 worker 的迟到信号，丢弃
         self._worker_done = True
         # 所有可播句均已播完（无可播就绪句）且播放器已停时才切章
         if (self._next_ready_index() is None
                 and self._player.playbackState() == QMediaPlayer.PlaybackState.StoppedState):
             self._finish_chapter()
 
-    def _on_fatal_error(self, message: str) -> None:
+    def _on_error(self, message: str, generation: int) -> None:
+        if generation != self._generation:
+            return
+        self.error.emit(message)
+
+    def _on_fatal_error(self, message: str, generation: int) -> None:
         """网络/服务持续失败：停止当前播放会话，避免每章反复重试弹错。"""
+        if generation != self._generation:
+            return
         self.stop()
         self.error.emit(message)
 

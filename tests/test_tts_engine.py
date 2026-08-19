@@ -223,3 +223,49 @@ def test_engine_skips_missing_index_on_media_end(qtbot, monkeypatch):
     qtbot.waitUntil(lambda: len(started) >= 2, timeout=15000)
     assert started[1] == 2  # 第二句是索引 2（跳过 1）
     engine.stop()
+
+
+def test_next_chapter_while_playing_survives_blocked_worker(qtbot, monkeypatch):
+    """播放中快速切章（旧 worker 卡在合成中）不得崩溃，新会话必须干净启动。
+
+    回归测试：stop() 对运行中 QThread 调用 setParent/deleteLater 是未定义行为，
+    曾导致 Qt 层崩溃（0xc0000409）。修复后应无阻塞等待、无跨会话污染。
+    """
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def blocking_synthesize(sentence, voice, rate, out_path):
+        entered.set()
+        release.wait(10)  # 模拟慢合成/网络卡顿
+        Path(out_path).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine.synthesize_sentence", blocking_synthesize)
+
+    engine = TtsEngine()
+    chapters = [
+        {"title": "第一章", "content": "甲。乙。丙。"},
+        {"title": "第二章", "content": "丁。戊。己。"},
+        {"title": "第三章", "content": "庚。辛。壬。"},
+    ]
+    errors: list[str] = []
+    engine.error.connect(errors.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
+    old_worker = engine._worker
+    assert entered.wait(5)  # 旧 worker 已卡在合成中
+
+    # 播放中快速连续切章：stop() 等待旧线程结束 + 新 worker 启动
+    engine.next_chapter()
+    engine.next_chapter()
+    assert engine.current_chapter_index() == 2
+    assert engine.has_session()
+
+    # 放行所有被阻塞的合成线程，确保引擎及其 worker 能安全收尾
+    release.set()
+    old_worker.wait(5000)
+    engine.stop()
+    assert not engine.has_session()
+    # 显式释放引擎，触发 __del__ 等待线程结束，避免跨测试残留崩溃
+    engine.deleteLater()
+    qtbot.waitUntil(lambda: engine._worker is None and not engine._retired_workers,
+                    timeout=5000)

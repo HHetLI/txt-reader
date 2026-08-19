@@ -18,6 +18,7 @@ def split_sentences(text: str, max_len: int | None = None) -> list[str]:
 
 def _chunk_sentence(sentence: str, max_len: int) -> list[str]:
     """把单句按 max_len 二次切分，优先在标点处断开（标点保留给前段）。"""
+    max_len = max(max_len, 1)  # 防呆：<=0 退化为 1，避免死循环
     if len(sentence) <= max_len:
         return [sentence]
     chunks: list[str] = []

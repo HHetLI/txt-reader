@@ -60,9 +60,16 @@ class IndexTTSBackend:
 
     def __init__(self, model_dir: Path | None = None):
         self._model_dir = model_dir or Path("models/indextts")
+        # 加载取消标记：worker 退役时置位，load() 在检查点快速抛错返回，
+        # 避免退役线程在 30-60s 模型加载中长期滞留（QThread GC 崩溃窗口）
+        self._load_cancelled = False
         if self._load_lock is None:
             import threading
             IndexTTSBackend._load_lock = threading.Lock()
+
+    def cancel_load(self) -> None:
+        """请求取消加载。线程安全（检查点轮询标志，非强制中断）。"""
+        self._load_cancelled = True
 
     def is_available(self) -> bool:
         """模型权重与 indextts 包是否就绪。"""
@@ -76,19 +83,30 @@ class IndexTTSBackend:
         return IndexTTSBackend._tts is not None
 
     def load(self) -> None:
-        """加载模型（首次调用，约 30-60s）。线程安全。"""
+        """加载模型（首次调用，约 30-60s）。线程安全，可被 cancel_load 取消。"""
         if IndexTTSBackend._tts is not None:
             return
         with self._load_lock:
             if IndexTTSBackend._tts is not None:
                 return
+            if self._load_cancelled:
+                raise TTSBackendError("IndexTTS 模型加载已取消")
             try:
                 from indextts.infer_v2_5 import IndexTTS2
+                # 检查点：import（含 torch 等重依赖）结束后仍被取消则放弃
+                if self._load_cancelled:
+                    raise TTSBackendError("IndexTTS 模型加载已取消")
                 IndexTTSBackend._tts = IndexTTS2(
                     cfg_path=str(self._model_dir / "config.yaml"),
                     model_dir=str(self._model_dir),
                     use_bf16=True,
                 )
+                # 检查点：构造期间收到取消 → 卸载并放弃，线程立即结束
+                if self._load_cancelled:
+                    self.unload()
+                    raise TTSBackendError("IndexTTS 模型加载已取消")
+            except TTSBackendError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 raise TTSBackendError(
                     f"IndexTTS2.5 模型加载失败: {exc}") from exc

@@ -52,9 +52,17 @@ class _SynthesisWorker(QThread):
         self._emo_mode = emo_mode
         self._emo_strength = emo_strength
         self._cancel = False
+        #: 当前是否处于懒加载中（供 __del__ 判断退役 worker 的加载滞留窗口）
+        self._loading = False
 
     def cancel(self) -> None:
         self._cancel = True
+        # 通知后端取消加载：worker 可能正处于懒加载（模型构造 30-60s），
+        # cancel_load 置位后 load() 在检查点快速抛错，退役线程尽快结束，
+        # 缩小 QThread 仍在运行时引擎被 GC 的崩溃窗口
+        cancel_load = getattr(self._backend, "cancel_load", None)
+        if cancel_load is not None:
+            cancel_load()
 
     def run(self) -> None:
         async def synth_all() -> None:
@@ -66,11 +74,14 @@ class _SynthesisWorker(QThread):
                 is_loaded = getattr(backend, "is_loaded", None)
                 if load is not None and is_loaded is not None and not is_loaded():
                     self.backend_status.emit("loading")
+                    self._loading = True
                     try:
                         load()
                     except Exception as exc:  # noqa: BLE001
                         self.backend_status.emit(f"error:{exc}")
                         return
+                    finally:
+                        self._loading = False
                     self.backend_status.emit("ready")
             failed_count = 0
             consecutive_failures = 0
@@ -176,9 +187,19 @@ class TtsEngine(QObject):
         丢弃引擎的场景（如异常退出），循环等待直到线程结束。
         """
         try:
+            # 加载中的 worker（模型构造 30-60s 为单体调用）无法被 cancel 中途打断，
+            # cancel_load 只在 load() 检查点生效；此处把加载中的等待上限放宽到
+            # 覆盖一次构造时长，避免 15s 内线程未结束时 GC 释放 QThread 崩溃
+            # （0xc0000409，__del__ 守卫针对的就是该场景）。
             deadline = 15.0
             import time as _time
             start = _time.monotonic()
+            if any(not w.isFinished() and getattr(w, "_loading", False)
+                   for w in list(self._retired_workers)) or (
+                       self._worker is not None
+                       and not self._worker.isFinished()
+                       and getattr(self._worker, "_loading", False)):
+                deadline = 120.0
             while _time.monotonic() - start < deadline:
                 alive = False
                 for w in list(self._retired_workers):
@@ -296,7 +317,9 @@ class TtsEngine(QObject):
     # ---- Task 3：后端切换 + 情感 ----
 
     def set_backend(self, name: str) -> None:
-        """切换后端（edge/indextts）；有会话则重启当前章节。"""
+        """切换后端（edge/indextts）；有会话则重启当前章节。未知名称忽略。"""
+        if name not in ("edge", "indextts"):
+            return
         if name == self._backend_name:
             return
         self._backend_name = name
@@ -423,11 +446,13 @@ class TtsEngine(QObject):
         self._backend_status = text
         self.backend_status.emit(text)
         if text.startswith("error:"):
-            # 懒加载失败：自动切 edge、重建后端、重启会话保持播放连续
+            # 懒加载失败：仅在仍有播放会话时回退 edge 并重启，保持播放连续；
+            # 已停止（无会话）时不改变后端配置——迟到信号不得幽灵切换后端
+            if not self.has_session():
+                return
             self._backend_name = "edge"
             self._backend = _backend_factory("edge")
-            if self.has_session():
-                self._start_chapter(self._chapter_index)
+            self._start_chapter(self._chapter_index)
 
     def _on_media_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:

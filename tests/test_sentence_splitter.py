@@ -37,6 +37,15 @@ def test_split_sentences_without_max_len_unchanged():
     assert split_sentences("你好。世界！") == ["你好。", "世界！"]
 
 
+def test_split_sentences_with_max_len_zero_or_negative():
+    # max_len <= 0 不进入死循环：退化为 1 字切分，且不丢字
+    text = "这是一个很长的句子。"
+    for bad in (0, -1):
+        sentences = split_sentences(text, max_len=bad)
+        assert all(len(s) >= 1 for s in sentences)
+        assert "".join(sentences) == text
+
+
 def test_split_long_sentence_respects_max_len():
     # 超长段按 max_len 二次切分，不丢字
     sentences = split_sentences(

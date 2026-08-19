@@ -51,13 +51,20 @@ uv sync --all-extras
 # Windows 下如 DeepSpeed 装不上，去掉：uv sync --extra webui
 ```
 
-- [ ] **Step 3: 下载模型（hf-mirror，约 10GB，耗时较长）**
+- [ ] **Step 3: 下载模型（国内镜像优先：魔搭 ModelScope；备选 hf-mirror，约 10GB）**
 
 ```powershell
-$env:HF_ENDPOINT = "https://hf-mirror.com"
-uv tool install "huggingface-hub"
-hf download IndexTeam/IndexTTS-2.5 --local-dir E:\WorkSpace\t2voice\.worktrees\indextts\models\indextts
+# 方案 A（优先）：魔搭 ModelScope（阿里国内服务器，速度快）
+uv tool install "modelscope"
+modelscope download --model IndexTeam/IndexTTS-2.5 --local_dir E:\WorkSpace\t2voice\.worktrees\indextts\models\indextts
+
+# 方案 B（备选）：hf-mirror 镜像
+# $env:HF_ENDPOINT = "https://hf-mirror.com"
+# uv tool install "huggingface-hub"
+# hf download IndexTeam/IndexTTS-2.5 --local-dir E:\WorkSpace\t2voice\.worktrees\indextts\models\indextts
 ```
+
+两个方案下载的权重内容相同（同一仓库）；若 ModelScope 失败换 hf-mirror。
 
 - [ ] **Step 4: 验证 GPU 识别（关键：确认不是 CPU mode）**
 

@@ -121,6 +121,9 @@ class TtsEngine(QObject):
                 self._worker.sentence_ready.disconnect(self._on_sentence_ready)
                 self._worker.all_done.disconnect(self._on_all_done)
                 self._worker.error_occurred.disconnect(self.error)
+                # 线程仍在运行：解除父子关系，等线程结束后再销毁，避免析构崩溃
+                self._worker.setParent(None)
+                self._worker.finished.connect(self._worker.deleteLater)
             self._worker = None
         self._ready.clear()
         self._next_index = 0

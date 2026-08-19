@@ -1,3 +1,6 @@
+import html
+
+from PySide6.QtGui import QTextBlockFormat, QTextCursor
 from PySide6.QtWidgets import QTextBrowser
 
 
@@ -15,13 +18,22 @@ class ReaderView(QTextBrowser):
         font.setPointSize(self._font_size)
         self.setFont(font)
         self.document().setDefaultStyleSheet(
-            f"body {{ font-size: {self._font_size}pt; line-height: {self._line_spacing:.1f}; }}"
+            f"body {{ font-size: {self._font_size}pt; }}"
         )
 
     def show_chapter(self, title: str, content: str) -> None:
-        body = content.replace("\n", "<br>")
-        self.setHtml(f"<h1>{title}</h1><br>{body}")
+        body = html.escape(content).replace("\n", "<br>")
+        self.setHtml(f"<h1>{html.escape(title)}</h1><br>{body}")
+        self._apply_line_spacing()
         self.verticalScrollBar().setValue(0)
+
+    def _apply_line_spacing(self) -> None:
+        block_fmt = QTextBlockFormat()
+        block_fmt.setLineHeight(self._line_spacing * 100,
+                                QTextBlockFormat.ProportionalHeight.value)
+        cursor = QTextCursor(self.document())
+        cursor.select(QTextCursor.Document)
+        cursor.mergeBlockFormat(block_fmt)
 
     def set_font_size(self, pt: int) -> None:
         self._font_size = pt
@@ -29,7 +41,7 @@ class ReaderView(QTextBrowser):
 
     def set_line_spacing(self, ratio: float) -> None:
         self._line_spacing = ratio
-        self._apply_style()
+        self._apply_line_spacing()
 
     def scroll_value(self) -> int:
         return self.verticalScrollBar().value()

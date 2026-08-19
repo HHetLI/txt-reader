@@ -25,7 +25,9 @@ def test_split_english_chapter():
 def test_split_special_titles():
     text = "楔子\n这是一个楔子。\n第一章 开始\n正文内容。\n番外 小花絮\n额外内容。"
     chapters = split_chapters(text)
+    assert len(chapters) == 3
     assert chapters[0]["title"] == "楔子"
+    assert "正文内容" in chapters[1]["content"]
     assert chapters[-1]["title"] == "番外 小花絮"
 
 

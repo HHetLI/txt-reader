@@ -21,6 +21,28 @@ def test_reader_view_font_size_changes(qapp):
     assert view._font_size == 24
 
 
+def test_reader_view_escapes_html_content(qapp):
+    """HTML 特殊字符（如 <未完待续>、<BR>）必须原样保留，不能当标签吞掉。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "正文<未完待续> 与 <BR> 标签")
+    text = view.toPlainText()
+    assert "<未完待续>" in text
+    assert "<BR>" in text
+
+
+def test_reader_view_line_spacing_sets_block_height(qapp):
+    """行距必须真正落到 QTextBlockFormat 的 lineHeight 上（CSS 在 Qt rich text 中无效）。"""
+    from PySide6.QtGui import QTextBlockFormat
+
+    view = ReaderView()
+    view.show_chapter("标题", "第一行\n第二行")
+    view.set_line_spacing(2.0)
+    block = view.document().begin()
+    fmt = block.blockFormat()
+    assert fmt.lineHeight() == 200.0
+    assert fmt.lineHeightType() == QTextBlockFormat.ProportionalHeight.value
+
+
 from ui.chapter_panel import ChapterPanel
 
 
@@ -103,9 +125,16 @@ def test_main_window_open_file_flow(qapp, tmp_path, monkeypatch):
 
 
 def test_open_file_switching_book_stops_engine(qapp, tmp_path, monkeypatch):
+    from pathlib import Path
+
     from PySide6.QtWidgets import QFileDialog
 
     import core.progress_store
+
+    async def fake_synthesize(sentence, voice, rate, out_path):
+        Path(out_path).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine.synthesize_sentence", fake_synthesize)
 
     book_a = tmp_path / "book_a.txt"
     book_a.write_text("第一章 风起\n内容甲。\n第二章 云涌\n内容乙。", encoding="utf-8")
@@ -117,7 +146,7 @@ def test_open_file_switching_book_stops_engine(qapp, tmp_path, monkeypatch):
                         staticmethod(lambda *a, **k: (str(book_a), "txt")))
     win = MainWindow()
     win.open_file()
-    # 开始播放 A（真实 TTS 网络调用，离线/失败也不影响断言）
+    # 开始播放 A（离线假合成，不发起真实网络调用）
     win._on_play_toggled()
     assert win._engine.has_session() is True
     monkeypatch.setattr(QFileDialog, "getOpenFileName",
@@ -151,3 +180,41 @@ def test_open_file_clamps_out_of_range_progress(qapp, tmp_path, monkeypatch):
     win = MainWindow()
     win.open_file()  # 不应抛出 IndexError
     assert win._chapter_panel.current_index() == 1
+
+
+def test_prev_next_uses_engine_index_when_session(qapp, tmp_path, monkeypatch):
+    """有会话（播放/暂停）时，⏭/⏮ 必须按引擎章节索引切章：
+    即使面板被用户点到其他章节，切章也必须跟随听书位置，防止视图与音频错位。"""
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QFileDialog
+
+    import core.progress_store
+
+    async def fake_synthesize(sentence, voice, rate, out_path):
+        Path(out_path).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine.synthesize_sentence", fake_synthesize)
+    book = tmp_path / "novel.txt"
+    book.write_text(
+        "第一章 风起\n甲。\n第二章 云涌\n乙。\n第三章 雷动\n丙。\n"
+        "第四章 雨落\n丁。\n第五章 雪飞\n戊。\n第六章 霜降\n己。",
+        encoding="utf-8")
+    monkeypatch.setattr(core.progress_store, "_store_path",
+                        lambda: tmp_path / "progress.json")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(book), "txt")))
+    win = MainWindow()
+    win.open_file()
+    win._on_play_toggled()
+    assert win._engine.has_session() is True
+    # 模拟：听书在第五章（索引 4），面板被点到第二章（索引 1）→ 视图与音频错位
+    win._engine._chapter_index = 4
+    win._chapter_panel.select_chapter(1)
+    win._on_next()
+    assert win._engine.current_chapter_index() == 5
+    assert win._chapter_panel.current_index() == 5
+    win._on_prev()
+    assert win._engine.current_chapter_index() == 4
+    assert win._chapter_panel.current_index() == 4
+    win._engine.stop()

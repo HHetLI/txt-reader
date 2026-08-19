@@ -99,6 +99,7 @@ class MainWindow(QMainWindow):
         self._chapter_panel.select_chapter(index)
         self._show_chapter(index)
         self._reader.restore_scroll(progress.get("scroll", 0))
+        self._save_progress()  # 恢复滚动后重存进度，避免把 scroll=0 覆盖回存档
         name = Path(path).name
         self._player_bar.set_status(f"已打开：{name}（{len(self._chapters)} 章）")
 
@@ -138,17 +139,33 @@ class MainWindow(QMainWindow):
     def _on_prev(self) -> None:
         if not self._chapters:
             return
+        # 有会话（播放/暂停）时，引擎章节索引是唯一事实来源：面板可能已被
+        # 用户点到与听书位置不一致的章节，必须按引擎索引切章，防止视图与音频错位
+        if self._engine.has_session():
+            idx = self._engine.current_chapter_index()
+            if idx > 0:
+                new_index = idx - 1
+                self._chapter_panel.select_chapter(new_index)
+                self._show_chapter(new_index)
+                self._engine.prev_chapter()
+            return
         index = self._chapter_panel.current_index()
         if index <= 0:
             return
         new_index = index - 1
         self._chapter_panel.select_chapter(new_index)
         self._show_chapter(new_index)
-        if self._engine.is_playing():
-            self._engine.prev_chapter()
 
     def _on_next(self) -> None:
         if not self._chapters:
+            return
+        if self._engine.has_session():
+            idx = self._engine.current_chapter_index()
+            if idx < len(self._chapters) - 1:
+                new_index = idx + 1
+                self._chapter_panel.select_chapter(new_index)
+                self._show_chapter(new_index)
+                self._engine.next_chapter()
             return
         index = self._chapter_panel.current_index()
         if index < 0 or index >= len(self._chapters) - 1:
@@ -156,8 +173,6 @@ class MainWindow(QMainWindow):
         new_index = index + 1
         self._chapter_panel.select_chapter(new_index)
         self._show_chapter(new_index)
-        if self._engine.is_playing():
-            self._engine.next_chapter()
 
     def _on_stop(self) -> None:
         self._engine.stop()

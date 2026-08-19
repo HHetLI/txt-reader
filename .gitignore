@@ -26,3 +26,6 @@ Thumbs.db
 
 # 运行时生成
 *.log
+
+# 本地模型权重（IndexTTS-2.5 等，约 10GB 不入库）
+models/

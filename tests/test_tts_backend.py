@@ -96,8 +96,41 @@ def test_load_after_cancel_resets_flag(monkeypatch):
     assert backend._load_cancelled is False
 
 
-# ---------- Task 6: 参考音频（spk_audio_prompt）可配置 ----------
+def test_load_passes_use_qwen_emo_for_auto_emotion(monkeypatch):
+    """Finding (e2e): 自动情感 use_emo_text 依赖 QwenEmotion，构造 IndexTTS2 必须
+    传 use_qwen_emo=True，否则真实推理时 RuntimeError。参考 CLI 亦如此。"""
+    IndexTTSBackend._tts = None
+    captured: dict = {}
 
+    class FakeIndexTTS2:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    # 提供假 indextts.infer_v2_5 模块（避免真实 torch 加载），并让 is_available 通过
+    monkeypatch.setattr(IndexTTSBackend, "is_available", lambda self: True)
+    import types
+
+    fake_mod = types.ModuleType("indextts.infer_v2_5")
+    fake_mod.IndexTTS2 = FakeIndexTTS2
+
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "indextts.infer_v2_5" or name == "indextts":
+            return fake_mod
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    backend = IndexTTSBackend(model_dir=Path("models/indextts"))
+    backend.load()
+    assert captured.get("use_qwen_emo") is True
+    assert captured.get("use_bf16") is True
+    IndexTTSBackend._tts = None  # 清理类级单例
+
+
+# ---------- Task 6: 参考音频（spk_audio_prompt）可配置 ----------
 
 def test_index_backend_accepts_spk_audio_prompt_param(tmp_path):
     """构造参数显式指定参考音频路径（权威值，即使文件不存在也原样保留）。"""

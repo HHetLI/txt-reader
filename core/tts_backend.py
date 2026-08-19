@@ -138,6 +138,9 @@ class IndexTTSBackend:
                     cfg_path=str(self._model_dir / "config.yaml"),
                     model_dir=str(self._model_dir),
                     use_bf16=True,
+                    # 自动情感（use_emo_text）依赖 QwenEmotion 文本→情感向量模型；
+                    # 不加载则 synthesize(use_emo_text=True) 抛 RuntimeError。
+                    use_qwen_emo=True,
                 )
                 # 检查点：构造期间收到取消 → 卸载并放弃，线程立即结束
                 if self._load_cancelled:

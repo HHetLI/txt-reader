@@ -15,8 +15,10 @@ class ChapterPanel(QWidget):
 
         top = QHBoxLayout()
         self._toggle_btn = QPushButton("📕")
+        self._toggle_btn.setObjectName("toggleBtn")
         self._toggle_btn.setToolTip("折叠/展开章节列表")
-        self._toggle_btn.setFixedWidth(32)
+        self._toggle_btn.setFixedWidth(26)
+        self._toggle_btn.setFixedHeight(22)
         self._toggle_btn.clicked.connect(self.toggle_visible)
         top.addWidget(self._toggle_btn)
         top.addStretch()
@@ -24,6 +26,9 @@ class ChapterPanel(QWidget):
 
         self._list = QListWidget()
         self._list.currentRowChanged.connect(self._emit_selected)
+        # 紧凑：行高缩小
+        self._list.setUniformItemSizes(True)
+        self._list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         layout.addWidget(self._list)
 
     def _emit_selected(self, row: int) -> None:

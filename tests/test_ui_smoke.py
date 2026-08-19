@@ -218,3 +218,24 @@ def test_prev_next_uses_engine_index_when_session(qapp, tmp_path, monkeypatch):
     assert win._engine.current_chapter_index() == 4
     assert win._chapter_panel.current_index() == 4
     win._engine.stop()
+
+
+def test_theme_applies_without_error(qapp):
+    """深色主题 QSS 可构建且应用到应用不抛异常。"""
+    from ui.theme import build_qss, apply_theme
+    qss = build_qss()
+    assert "background-color" in qss
+    assert "#1b1e26" in qss  # 深色主背景
+    apply_theme(qapp)
+    assert qapp.styleSheet() == qss
+
+
+def test_reader_view_dark_style(qapp):
+    """正文区深色样式：文字浅色、标题强调色。"""
+    from ui.reader_view import ReaderView
+    view = ReaderView()
+    view.show_chapter("第一章", "正文内容")
+    css = view.document().defaultStyleSheet()
+    assert "#d5dae3" in css  # 浅色正文
+    assert "#7fa3ff" in css  # 标题强调色
+    assert view.viewportMargins().left() == 30  # 紧凑边距

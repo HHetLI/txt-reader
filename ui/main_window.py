@@ -11,6 +11,7 @@ from core.tts_engine import TtsEngine
 from ui.chapter_panel import ChapterPanel
 from ui.player_bar import PlayerBar
 from ui.reader_view import ReaderView
+from ui.theme import apply_theme
 
 
 class MainWindow(QMainWindow):
@@ -18,6 +19,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("小说阅读听书")
         self.resize(1000, 700)
+        apply_theme(self)  # 深色主题（QSS 作用到整个应用）
 
         self._engine = TtsEngine(self)
         self._chapters: list[dict] = []
@@ -31,11 +33,13 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._chapter_panel)
         splitter.addWidget(self._reader)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([220, 780])
+        splitter.setSizes([170, 830])  # 紧凑：章节列表 170px
 
         central = QWidget()
+        central.setObjectName("centralRoot")
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(splitter)
         layout.addWidget(self._player_bar)
         self.setCentralWidget(central)

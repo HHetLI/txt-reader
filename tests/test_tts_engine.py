@@ -518,3 +518,45 @@ def test_engine_set_emotion_kept_for_later_switch(qtbot, monkeypatch):
     engine.set_backend("indextts")
     assert engine._emotion_mode == "悲伤"
     assert engine._emotion_strength == 0.4
+
+
+# ---------- Task 6: play_chapters 透传 backend/emotion ----------
+
+
+def test_engine_play_chapters_accepts_backend_and_emotion_params(qtbot, fake_synth):
+    """play_chapters 的 backend/emotion 参数立即生效（UI 播放时透传控件值）。"""
+    engine = TtsEngine()
+    chapters = [{"title": "第一章", "content": "甲。乙。"}]
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%",
+                         backend="edge", emotion_mode="悲伤",
+                         emotion_strength=0.4)
+    assert engine.backend() == "edge"
+    assert engine._emotion_mode == "悲伤"
+    assert engine._emotion_strength == 0.4
+    engine.stop()
+
+
+def test_engine_play_chapters_passes_emotion_to_backend(qtbot, monkeypatch):
+    """play_chapters 传入的情感参数必须随会话透传到后端 synthesize。"""
+    synth_kwargs: list[dict] = []
+
+    class FakeBackend:
+        name = "fake"
+
+        async def synthesize(self, **kwargs):
+            synth_kwargs.append(kwargs)
+            Path(kwargs["out_path"]).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory", lambda n: FakeBackend())
+    engine = TtsEngine()
+    chapters = [{"title": "第一章", "content": "甲。乙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%",
+                         backend="indextts", emotion_mode="悲伤",
+                         emotion_strength=0.4)
+    assert engine.backend() == "indextts"
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=5000)
+    assert synth_kwargs and synth_kwargs[0]["emo_mode"] == "悲伤"
+    assert synth_kwargs[0]["emo_strength"] == 0.4
+    engine.stop()

@@ -1,5 +1,6 @@
 """TTS 后端统一接口：edge-tts（快速）与 IndexTTS2.5（情感朗读）可切换。"""
 
+import os
 from pathlib import Path
 
 import edge_tts
@@ -36,6 +37,36 @@ def sentence_limit_for_backend(backend: str) -> int:
     return _BACKEND_SENTENCE_LIMIT.get(backend, 200)
 
 
+#: 常见参考音频候选位置（按优先级）：CWD 相对、Task 1 克隆的 index-tts 仓库
+_SPK_AUDIO_CANDIDATES = (
+    Path("examples/voice_01.wav"),
+    Path(r"E:/WorkSpace/index-tts/examples/voice_01.wav"),
+)
+
+
+def resolve_spk_audio_prompt(explicit: Path | None = None) -> Path | None:
+    """解析 IndexTTS 参考音频（spk_audio_prompt）路径。
+
+    优先级：显式构造参数 > 环境变量 INDEXTTS_REF_AUDIO > 常见位置
+    （CWD 相对 examples/voice_01.wav、index-tts 克隆仓库内 examples/voice_01.wav）。
+    显式参数是权威值——即使文件当前不存在也原样返回（存在性在 synthesize 时
+    校验并报明确错误）；环境变量与常见位置只采纳真实存在的文件，全部缺失返回
+    None（同样在 synthesize 时报错）。
+    """
+    if explicit is not None:
+        return explicit.resolve()
+    env = os.environ.get("INDEXTTS_REF_AUDIO")
+    if env:
+        env_path = Path(env)
+        if env_path.is_file():
+            return env_path.resolve()
+    for candidate in _SPK_AUDIO_CANDIDATES:
+        if candidate.is_file():
+            # 转为绝对路径：构造与合成可能跨目录（合成时 CWD 未必还是构造时的 CWD）
+            return candidate.resolve()
+    return None
+
+
 class EdgeTTSBackend:
     """edge-tts 后端：快速、免费、无需显存。"""
 
@@ -58,8 +89,13 @@ class IndexTTSBackend:
     _tts = None  # IndexTTS2 实例（懒加载）
     _load_lock = None  # threading.Lock
 
-    def __init__(self, model_dir: Path | None = None):
+    def __init__(self, model_dir: Path | None = None,
+                 spk_audio_prompt: Path | str | None = None):
         self._model_dir = model_dir or Path("models/indextts")
+        # 参考音频路径可配置：显式参数 > INDEXTTS_REF_AUDIO > 常见位置（见
+        # resolve_spk_audio_prompt）。不硬编码仓库外路径，缺失时 synthesize 报明确错误。
+        self._spk_audio_prompt = resolve_spk_audio_prompt(
+            Path(spk_audio_prompt) if spk_audio_prompt is not None else None)
         # 加载取消标记：worker 退役时置位，load() 在检查点快速抛错返回，
         # 避免退役线程在 30-60s 模型加载中长期滞留（QThread GC 崩溃窗口）
         self._load_cancelled = False
@@ -118,6 +154,12 @@ class IndexTTSBackend:
 
     async def synthesize(self, text: str, emo_mode: str, emo_strength: float,
                          out_path: Path) -> None:
+        prompt = self._spk_audio_prompt
+        if prompt is None or not prompt.is_file():
+            raise TTSBackendError(
+                "参考音频缺失（voice_01.wav）：请设置环境变量 INDEXTTS_REF_AUDIO "
+                "指向 index-tts 的 examples/voice_01.wav，或在 CWD 的 "
+                "examples/ 目录放置参考音频")
         if not self.is_available():
             raise TTSBackendError("IndexTTS2.5 模型未安装，请先运行环境准备")
         import asyncio
@@ -132,7 +174,7 @@ class IndexTTSBackend:
                 kwargs["use_emo_text"] = True
                 kwargs["emo_alpha"] = emo_strength
             self._tts.infer(
-                spk_audio_prompt="examples/voice_01.wav",
+                spk_audio_prompt=str(prompt),
                 text=text, lang="ZH",
                 output_path=str(out_path), **kwargs)
 

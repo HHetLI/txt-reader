@@ -94,3 +94,47 @@ def test_load_after_cancel_resets_flag(monkeypatch):
     # 关键断言：已越过首个取消检查点 → 异常来自 import 失败，而非"已取消"
     assert "已取消" not in str(exc_info.value)
     assert backend._load_cancelled is False
+
+
+# ---------- Task 6: 参考音频（spk_audio_prompt）可配置 ----------
+
+
+def test_index_backend_accepts_spk_audio_prompt_param(tmp_path):
+    """构造参数显式指定参考音频路径（权威值，即使文件不存在也原样保留）。"""
+    ref = tmp_path / "voice_01.wav"
+    ref.write_bytes(b"fake-wav")
+    backend = IndexTTSBackend(model_dir=tmp_path / "models",
+                              spk_audio_prompt=ref)
+    assert backend._spk_audio_prompt == ref
+
+
+def test_index_backend_resolves_spk_audio_prompt_from_env(monkeypatch, tmp_path):
+    """未显式指定时优先从环境变量 INDEXTTS_REF_AUDIO 解析。"""
+    ref = tmp_path / "voice_01.wav"
+    ref.write_bytes(b"fake-wav")
+    monkeypatch.setenv("INDEXTTS_REF_AUDIO", str(ref))
+    backend = IndexTTSBackend(model_dir=tmp_path / "models")
+    assert backend._spk_audio_prompt == ref
+
+
+def test_index_backend_no_prompt_env_keeps_default_resolution(monkeypatch, tmp_path):
+    """环境变量指向不存在的文件时不采纳，继续走常见位置候选。"""
+    monkeypatch.setenv("INDEXTTS_REF_AUDIO", str(tmp_path / "missing.wav"))
+    # 构造真实存在的候选：CWD 下建 examples/voice_01.wav
+    examples = tmp_path / "examples"
+    examples.mkdir()
+    ref = examples / "voice_01.wav"
+    ref.write_bytes(b"fake-wav")
+    monkeypatch.chdir(tmp_path)
+    backend = IndexTTSBackend(model_dir=tmp_path / "models")
+    assert backend._spk_audio_prompt == ref
+
+
+@pytest.mark.asyncio
+async def test_index_backend_missing_spk_audio_prompt_raises(tmp_path):
+    """参考音频缺失时 synthesize 报明确错误（不依赖机器上是否存在克隆仓库）。"""
+    backend = IndexTTSBackend(model_dir=tmp_path / "models",
+                              spk_audio_prompt=tmp_path / "no_such.wav")
+    with pytest.raises(TTSBackendError) as exc_info:
+        await backend.synthesize("你好。", "auto", 0.6, tmp_path / "o.mp3")
+    assert "INDEXTTS_REF_AUDIO" in str(exc_info.value)

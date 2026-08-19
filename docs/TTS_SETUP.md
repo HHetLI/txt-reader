@@ -40,3 +40,14 @@ $env:HF_HUB_CACHE = "E:\WorkSpace\t2voice\.worktrees\indextts\models\indextts\hf
 2. ModelScope 下载后须校验 sha256（首次下载被污染过，重下即好）
 3. 示例音频 `voice_01.wav` 官方源 404，用 edge-tts 生成替代
 4. python -c 方式调用 infer 不稳定（挂起），**用脚本文件 + use_qwen_emo=True + text_normalization=True** 稳定
+
+## 参考音频（spk_audio_prompt）解析
+
+IndexTTS 的 `spk_audio_prompt` 不再硬编码，`IndexTTSBackend` 构造时按以下优先级解析
+（见 `core/tts_backend.py` 的 `resolve_spk_audio_prompt`）：
+
+1. 构造参数 `spk_audio_prompt=`（权威值，即使文件不存在也原样保留，合成时校验）
+2. 环境变量 `INDEXTTS_REF_AUDIO`（指向 `examples/voice_01.wav` 的绝对路径）
+3. 常见位置：CWD 下 `examples/voice_01.wav` → `E:\WorkSpace\index-tts\examples\voice_01.wav`
+
+全部缺失时合成（synthesize）阶段报明确 `TTSBackendError`，提示设置 `INDEXTTS_REF_AUDIO`。

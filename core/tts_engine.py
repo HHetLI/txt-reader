@@ -219,7 +219,10 @@ class TtsEngine(QObject):
     # ---------- 对外 API ----------
 
     def play_chapters(self, chapters: list[dict], start_index: int = 0,
-                      voice: str | None = None, rate: str | None = None) -> None:
+                      voice: str | None = None, rate: str | None = None,
+                      backend: str | None = None,
+                      emotion_mode: str | None = None,
+                      emotion_strength: float | None = None) -> None:
         self.stop()
         if not chapters:
             return
@@ -229,6 +232,13 @@ class TtsEngine(QObject):
             self._voice = voice
         if rate:
             self._rate = rate
+        # Task 6：播放时透传 UI 控件值（引擎/情感参数立即生效，供后续会话使用）
+        if backend:
+            self.set_backend(backend)
+        if emotion_mode is not None:
+            self._emotion_mode = emotion_mode
+        if emotion_strength is not None:
+            self._emotion_strength = emotion_strength
         self._start_chapter(self._chapter_index)
 
     def toggle_play(self) -> None:

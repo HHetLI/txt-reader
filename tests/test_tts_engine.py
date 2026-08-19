@@ -82,7 +82,7 @@ def test_engine_stop_clears_session(qtbot, fake_synth):
 
 
 def test_engine_drains_after_synthesis_error(qtbot, monkeypatch):
-    """合成失败后：error 触发，且 EndOfMedia 时推进章节而非永久卡死。"""
+    """连续多句合成失败（如断网）：触发 fatal 错误，停止播放而非卡死或反复切章。"""
 
     async def failing_synthesize(sentence, voice, rate, out_path):
         raise RuntimeError("网络不可用")
@@ -91,21 +91,18 @@ def test_engine_drains_after_synthesis_error(qtbot, monkeypatch):
 
     engine = TtsEngine()
     chapters = [
-        {"title": "第一章", "content": "甲。"},
-        {"title": "第二章", "content": "乙。"},
+        {"title": "第一章", "content": "甲。乙。丙。丁。"},
     ]
     errors: list[str] = []
     engine.error.connect(errors.append)
     engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
-    # 第一句合成失败 → error 触发，且错误路径也发出 all_done（_worker_done 置位）
-    qtbot.waitUntil(lambda: len(errors) >= 1, timeout=5000)
-    qtbot.waitUntil(lambda: engine._worker_done, timeout=5000)
-    assert errors[0] == "网络不可用"
+    # 连续 3 句失败 → fatal 错误触发，且引擎停止（会话清空）
+    qtbot.waitUntil(lambda: len(errors) >= 1, timeout=15000)
+    qtbot.waitUntil(lambda: not engine.has_session(), timeout=5000)
+    assert any("网络连接异常" in e for e in errors)
+    assert any("网络不可用" in e for e in errors)
+    # 引擎已停止：不再有会话，不会反复切章或卡死
     assert engine.current_chapter_index() == 0
-    # 模拟本句播放结束：worker 已 done 且无可播句 → 应推进章节而非卡死
-    engine._on_media_status(QMediaPlayer.MediaStatus.EndOfMedia)
-    qtbot.waitUntil(lambda: engine.current_chapter_index() == 1, timeout=5000)
-    engine.stop()
 
 
 def test_stop_disconnects_stale_worker(qtbot, monkeypatch):
@@ -147,3 +144,82 @@ def test_stop_disconnects_stale_worker(qtbot, monkeypatch):
     assert engine._ready == {}
     assert engine._next_index == 0
     assert errors == []
+
+
+def test_worker_retries_transient_failure_then_continues(qtbot, monkeypatch):
+    """偶发失败（如网络抖动）应自动重试，重试成功后继续，不中断整章。"""
+
+    calls: dict[int, int] = {}
+
+    async def flaky_synthesize(sentence, voice, rate, out_path):
+        # 每句第一次调用抛异常（模拟偶发 NoAudioReceived），重试后成功
+        key = sentence
+        calls[key] = calls.get(key, 0) + 1
+        if calls[key] == 1:
+            raise RuntimeError("No audio received")
+        Path(out_path).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine.synthesize_sentence", flaky_synthesize)
+
+    out_dir = Path(tempfile.mkdtemp(prefix="t2voice_test_"))
+    worker = _SynthesisWorker(["甲。", "乙。", "丙。"], "v", "+0%", out_dir)
+    ready: list[tuple[int, Path]] = []
+    errors: list[str] = []
+    worker.sentence_ready.connect(lambda i, p: ready.append((i, Path(p))))
+    worker.error_occurred.connect(errors.append)
+    worker.start()
+    qtbot.waitSignal(worker.all_done, timeout=15000).wait()
+    worker.wait(5000)
+    # 重试后全部成功，无 error
+    assert [i for i, _ in ready] == [0, 1, 2]
+    assert errors == []
+    # 每句都调用过 2 次（1 次失败 + 1 次重试成功）
+    assert all(v == 2 for v in calls.values())
+
+
+def test_worker_skips_persistently_failing_sentence(qtbot, monkeypatch):
+    """重试后仍失败的句子应跳过，其余句子继续，worker 正常结束不挂死。"""
+
+    async def mostly_failing_synthesize(sentence, voice, rate, out_path):
+        if sentence == "乙。":  # 乙句永远失败
+            raise RuntimeError("No audio received")
+        Path(out_path).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine.synthesize_sentence", mostly_failing_synthesize)
+
+    out_dir = Path(tempfile.mkdtemp(prefix="t2voice_test_"))
+    worker = _SynthesisWorker(["甲。", "乙。", "丙。"], "v", "+0%", out_dir)
+    ready: list[tuple[int, Path]] = []
+    errors: list[str] = []
+    worker.sentence_ready.connect(lambda i, p: ready.append((i, Path(p))))
+    worker.error_occurred.connect(errors.append)
+    worker.start()
+    qtbot.waitSignal(worker.all_done, timeout=15000).wait()
+    worker.wait(5000)
+    # 乙句被跳过（索引 1 缺失），其余正常
+    assert [i for i, _ in ready] == [0, 2]
+    assert len(errors) >= 1  # 有失败句时发提示
+
+
+def test_engine_skips_missing_index_on_media_end(qtbot, monkeypatch):
+    """句 1 永久失败被跳过时，EndOfMedia 后引擎应跳过缺失索引播下一句，不卡死。"""
+
+    async def skipping_synthesize(sentence, voice, rate, out_path):
+        if sentence == "乙。":
+            raise RuntimeError("No audio received")
+        Path(out_path).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine.synthesize_sentence", skipping_synthesize)
+
+    engine = TtsEngine()
+    chapters = [{"title": "第一章", "content": "甲。乙。丙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
+    # 句 0 开始播放
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=15000)
+    # 句 0 播完：应跳过缺失的句 1，直接播放句 2
+    engine._on_media_status(QMediaPlayer.MediaStatus.EndOfMedia)
+    qtbot.waitUntil(lambda: len(started) >= 2, timeout=15000)
+    assert started[1] == 2  # 第二句是索引 2（跳过 1）
+    engine.stop()

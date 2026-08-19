@@ -19,6 +19,14 @@ class _SynthesisWorker(QThread):
     sentence_ready = Signal(int, str)
     all_done = Signal(int)  # 参数：总句数（start_index + len）
     error_occurred = Signal(str)
+    fatal_error = Signal(str)  # 网络/服务持续失败（连续多句失败），应停止播放
+
+    #: 单句合成失败时的重试次数（edge-tts 在线服务偶发失败，如 NoAudioReceived）
+    MAX_RETRIES = 2
+    #: 重试前的退避秒数
+    RETRY_DELAY = 0.8
+    #: 连续失败达到该阈值即判定网络断开（停止播放，避免每章反复弹错）
+    FATAL_FAILURE_THRESHOLD = 3
 
     def __init__(self, sentences: list[str], voice: str, rate: str,
                  out_dir: Path, start_index: int = 0, parent=None):
@@ -35,6 +43,8 @@ class _SynthesisWorker(QThread):
 
     def run(self) -> None:
         async def synth_all() -> None:
+            failed_count = 0
+            consecutive_failures = 0
             for i, sentence in enumerate(self._sentences):
                 idx = self._start_index + i
                 if self._cancel:
@@ -42,19 +52,39 @@ class _SynthesisWorker(QThread):
                 if not sentence.strip():
                     continue
                 path = self._out_dir / f"sentence_{idx:05d}.mp3"
-                try:
-                    await synthesize_sentence(sentence, self._voice, self._rate, path)
-                except Exception as exc:  # noqa: BLE001
+                ok = False
+                last_error: Exception | None = None
+                # 重试机制：edge-tts 在线服务偶发失败（NoAudioReceived 等），
+                # 失败后重试 MAX_RETRIES 次，避免单次网络抖动中断整章听书
+                for attempt in range(self.MAX_RETRIES + 1):
                     if self._cancel:
                         break
-                    self.error_occurred.emit(str(exc))
-                    # 错误也要发出终态信号：否则引擎的 _worker_done 恒为 False，
-                    # 下一次 EndOfMedia 会一直等待，播放永久卡死无法排空
-                    self.all_done.emit(self._start_index + len(self._sentences))
-                    return
+                    try:
+                        await synthesize_sentence(sentence, self._voice, self._rate, path)
+                        ok = True
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = exc
+                        if attempt < self.MAX_RETRIES:
+                            await asyncio.sleep(self.RETRY_DELAY)
                 if self._cancel:
                     break
-                self.sentence_ready.emit(idx, str(path))
+                if ok:
+                    consecutive_failures = 0
+                    self.sentence_ready.emit(idx, str(path))
+                else:
+                    # 重试后仍失败：跳过该句继续，不中断整章
+                    failed_count += 1
+                    consecutive_failures += 1
+                    if consecutive_failures >= self.FATAL_FAILURE_THRESHOLD:
+                        # 连续多句失败说明网络/服务不可用：停止整章，避免每章反复重试
+                        self.fatal_error.emit(
+                            f"网络连接异常，朗读已停止（{last_error}）")
+                        self.all_done.emit(self._start_index + len(self._sentences))
+                        return
+            if failed_count > 0:
+                self.error_occurred.emit(
+                    f"本章有 {failed_count} 句合成失败，已跳过继续播放")
             self.all_done.emit(self._start_index + len(self._sentences))
 
         asyncio.run(synth_all())
@@ -178,6 +208,7 @@ class TtsEngine(QObject):
         self._worker.sentence_ready.connect(self._on_sentence_ready)
         self._worker.all_done.connect(self._on_all_done)
         self._worker.error_occurred.connect(self.error)
+        self._worker.fatal_error.connect(self._on_fatal_error)
         self._worker.start()
         self.playing.emit(True)
 
@@ -189,20 +220,35 @@ class TtsEngine(QObject):
 
     def _on_sentence_ready(self, index: int, path: str) -> None:
         self._ready[index] = path
-        if index == self._next_index:
+        # 若当前未在播放且未处于暂停（含播放器空闲/刚启动），立即播下一个就绪句；
+        # 暂停中保持暂停，等用户恢复
+        if (self._player.playbackState() != QMediaPlayer.PlaybackState.PausedState
+                and not self._player.isPlaying()
+                and self._next_ready_index() is not None):
             self._play_next()
+
+    def _next_ready_index(self) -> int | None:
+        """返回 >= _next_index 的最小已就绪句索引；无则返回 None（支持跳过失败句）。"""
+        for k in sorted(self._ready):
+            if k >= self._next_index:
+                return k
+        return None
 
     def _on_all_done(self, total: int) -> None:
         self._worker_done = True
-        # 仅当所有句子均已合成、无可播的下一句、且播放器已停（最后一句播完）时才切章
-        if (self._next_index >= total
-                and self._next_index not in self._ready
+        # 所有可播句均已播完（无可播就绪句）且播放器已停时才切章
+        if (self._next_ready_index() is None
                 and self._player.playbackState() == QMediaPlayer.PlaybackState.StoppedState):
             self._finish_chapter()
 
+    def _on_fatal_error(self, message: str) -> None:
+        """网络/服务持续失败：停止当前播放会话，避免每章反复重试弹错。"""
+        self.stop()
+        self.error.emit(message)
+
     def _on_media_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            if self._next_index in self._ready:
+            if self._next_ready_index() is not None:
                 self._play_next()
             elif not self._worker_done:
                 pass  # 等待 worker 合成下一句
@@ -210,11 +256,12 @@ class TtsEngine(QObject):
                 self._finish_chapter()
 
     def _play_next(self) -> None:
-        if self._next_index not in self._ready:
+        idx = self._next_ready_index()
+        if idx is None:
             return
-        path = self._ready.pop(self._next_index)
-        self._next_index += 1
-        self.sentence_started.emit(self._next_index - 1)
+        path = self._ready.pop(idx)
+        self._next_index = idx + 1
+        self.sentence_started.emit(idx)
         self._player.setSource(QUrl.fromLocalFile(path))
         self._player.play()
 

@@ -109,7 +109,7 @@ def test_player_bar_backend_default_indextts(qapp):
 def test_player_bar_emotion_defaults(qapp):
     """情感默认：自动 + 强度 60%（0.0-1.0 浮点）。"""
     bar = PlayerBar()
-    assert bar.emotion_mode() == "自动"
+    assert bar.emotion_mode() == "auto"  # 键与后端 EMO_MODE_AUTO 一致
     assert bar.emotion_strength() == 0.6
     assert bar._strength.value() == 60
 
@@ -170,10 +170,13 @@ def test_player_bar_emotion_controls_toggle_with_backend(qapp):
 
 
 def test_player_bar_emotion_presets(qapp):
-    """情感下拉包含全部预设，索引 0 为自动。"""
+    """情感下拉包含全部预设（显示文本），索引 0 为自动。"""
     bar = PlayerBar()
     texts = [bar._emotion.itemText(i) for i in range(bar._emotion.count())]
     assert texts == ["自动", "平静", "悲伤", "激昂", "温柔", "恐惧", "高兴"]
+    # 键与后端预设一致（自动→auto，其余中文名）
+    keys = [bar._emotion.itemData(i) for i in range(bar._emotion.count())]
+    assert keys == ["auto", "平静", "悲伤", "激昂", "温柔", "恐惧", "高兴"]
 
 
 def test_player_bar_set_backend_status(qapp):

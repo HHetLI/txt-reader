@@ -16,8 +16,17 @@ ENGINES = [
     ("indextts", "IndexTTS2.5 情感"),
     ("edge", "edge-tts 快速"),
 ]
-# 情感预设（IndexTTS 模式生效）；索引 0 为自动
-EMOTIONS = ["自动", "平静", "悲伤", "激昂", "温柔", "恐惧", "高兴"]
+# 情感预设（IndexTTS 模式生效）：(键, 显示文本)；索引 0 为自动
+# 键与 core/tts_backend.EMO_MODE_AUTO / EMO_VECTOR_PRESETS 一致
+EMOTIONS = [
+    ("auto", "自动"),
+    ("平静", "平静"),
+    ("悲伤", "悲伤"),
+    ("激昂", "激昂"),
+    ("温柔", "温柔"),
+    ("恐惧", "恐惧"),
+    ("高兴", "高兴"),
+]
 # 情感强度滑条范围：0-100，默认 60%（emotion_strength() 返回 0.0-1.0）
 STRENGTH_MIN, STRENGTH_MAX, STRENGTH_DEFAULT = 0, 100, 60
 
@@ -65,7 +74,8 @@ class PlayerBar(QWidget):
         layout.addWidget(QLabel("情感:"))
         self._emotion = QComboBox()
         self._emotion.setObjectName("emotionCombo")
-        self._emotion.addItems(EMOTIONS)
+        for key, label in EMOTIONS:
+            self._emotion.addItem(label, key)
         self._emotion.setFixedWidth(80)
         self._emotion.currentTextChanged.connect(self._on_emotion_changed)
         layout.addWidget(self._emotion)
@@ -143,7 +153,7 @@ class PlayerBar(QWidget):
         return self._engine_combo.currentData()
 
     def emotion_mode(self) -> str:
-        return self._emotion.currentText()
+        return self._emotion.currentData()
 
     def emotion_strength(self) -> float:
         return self._strength.value() / 100.0

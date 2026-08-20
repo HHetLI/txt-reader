@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtMultimedia import QMediaPlayer
 
+from core.tts_backend import EdgeTTSBackend, TTSBackendError
 from core.tts_engine import TtsEngine, _SynthesisWorker
 
 
@@ -118,6 +119,18 @@ def test_stop_disconnects_stale_worker(qtbot, monkeypatch):
         Path(out_path).write_bytes(b"fake-mp3")
 
     monkeypatch.setattr("core.tts_engine.synthesize_sentence", blocking_synthesize)
+
+    # Finding 2：stub _backend_factory 为 fake edge 后端。worker 按 name=="edge"
+    # 路由到 synthesize_sentence 接缝（不触发懒加载），测试绿色不再依赖
+    # “模型未安装”（is_available()==False 的同步回退），装好模型后依然可测。
+    class FakeEdgeBackend:
+        name = "edge"
+
+        async def synthesize(self, *a, **k):
+            raise AssertionError("应走 synthesize_sentence 接缝")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory",
+                        lambda n: FakeEdgeBackend())
 
     engine = TtsEngine()
     chapters = [{"title": "第一章", "content": "甲。乙。"}]
@@ -242,6 +255,17 @@ def test_next_chapter_while_playing_survives_blocked_worker(qtbot, monkeypatch):
 
     monkeypatch.setattr("core.tts_engine.synthesize_sentence", blocking_synthesize)
 
+    # Finding 2：stub _backend_factory 为 fake edge 后端，使 worker 走
+    # synthesize_sentence 接缝而非 IndexTTS 懒加载（同 test_stop_disconnects_stale_worker）
+    class FakeEdgeBackend:
+        name = "edge"
+
+        async def synthesize(self, *a, **k):
+            raise AssertionError("应走 synthesize_sentence 接缝")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory",
+                        lambda n: FakeEdgeBackend())
+
     engine = TtsEngine()
     chapters = [
         {"title": "第一章", "content": "甲。乙。丙。"},
@@ -269,3 +293,430 @@ def test_next_chapter_while_playing_survives_blocked_worker(qtbot, monkeypatch):
     engine.deleteLater()
     qtbot.waitUntil(lambda: engine._worker is None and not engine._retired_workers,
                     timeout=5000)
+
+
+def test_engine_stale_load_error_after_stop_does_not_flip_backend(qtbot, monkeypatch):
+    """Finding 1 回归：stop() 后迟到的懒加载 error 信号不得把后端幽灵切到 edge。
+
+    场景：用户在 IndexTTS 加载窗口（约 2-4 分钟）内停止 → 加载失败 → "error:" 信号
+    在会话已清空后投递（代际令牌未变，处理函数会被调用）。引擎应保持配置的
+    后端不变，仅在有会话时才回退 edge 并重启。
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    class FakeIndexBackend:
+        name = "indextts"
+
+        def is_available(self):
+            return True  # 模型可用：避免 _start_chapter 同步回退 edge
+
+        def is_loaded(self):
+            return False
+
+        def load(self):
+            entered.set()
+            release.wait(10)  # 模拟加载窗口
+            raise TTSBackendError("模型加载失败")
+
+        async def synthesize(self, **kwargs):
+            raise AssertionError("不应走到 synthesize")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory",
+                        lambda n: FakeIndexBackend())
+    engine = TtsEngine()
+    chapters = [{"title": "第一章", "content": "甲。"}]
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
+    assert engine.backend() == "indextts"
+    worker = engine._worker
+    assert entered.wait(5)  # worker 已进入加载
+
+    engine.stop()  # 用户中途停止：会话清空，worker 退役（仍在加载中）
+    assert not engine.has_session()
+
+    release.set()  # 加载失败 → worker 发 error 并结束
+    worker.wait(5000)
+
+    # 迟到的 error 信号投递到主线程（信号已断开，手动补发以确定性地验证守卫）
+    engine._on_worker_backend_status("error:模型加载失败", engine._generation)
+    # 后端保持 indextts：无会话时不回退 edge
+    assert engine.backend() == "indextts"
+
+
+# ---------- Task 3: backend 切换 + 懒加载 ----------
+
+
+def test_engine_backend_default_is_indextts(qtbot, monkeypatch):
+    engine = TtsEngine()
+    assert engine.backend() == "indextts"  # 设计默认：情感引擎
+
+
+def test_engine_switch_backend_restarts_session(qtbot, monkeypatch):
+    # fake backend 记录调用；验证 set_backend 后当前章节重启（重新 play_chapters）
+    calls: list[str] = []
+
+    class FakeBackend:
+        name = "fake"
+
+        async def synthesize(self, *a, **k):
+            calls.append(k.get("emo_mode", "?"))
+
+    def factory(name):
+        return FakeBackend()
+
+    monkeypatch.setattr("core.tts_engine._backend_factory", factory)
+    engine = TtsEngine()
+    engine.set_backend("indextts")
+    assert engine.backend() == "indextts"
+    # 无会话时不崩溃
+    engine.set_backend("edge")
+    assert engine.backend() == "edge"
+
+
+def test_engine_set_emotion_passes_to_backend(qtbot, monkeypatch):
+    """set_emotion 的参数必须随会话透传到后端 synthesize（Finding 3 补断言）。"""
+    received: dict = {}
+
+    class FakeBackend:
+        name = "fake"
+
+        async def synthesize(self, **kwargs):
+            received.update(kwargs)
+            Path(kwargs["out_path"]).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory", lambda n: FakeBackend())
+    engine = TtsEngine()
+    engine.set_backend("indextts")
+    engine.set_emotion("悲伤", 0.5)
+    assert engine._emotion_mode == "悲伤"
+    assert engine._emotion_strength == 0.5
+    # 启动会话，验证情感参数确实到达后端 synthesize
+    chapters = [{"title": "第一章", "content": "甲。乙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=5000)
+    assert received.get("emo_mode") == "悲伤"
+    assert received.get("emo_strength") == 0.5
+    engine.stop()
+
+
+def test_engine_lazy_load_indextts_emits_status(qtbot, monkeypatch):
+    """IndexTTS 首次 synthesize 前懒加载：loading → ready，且合成带情感参数。"""
+    statuses: list[str] = []
+    synth_kwargs: list[dict] = []
+    loaded = False
+
+    class FakeIndexBackend:
+        name = "indextts"
+
+        def is_loaded(self):
+            return loaded
+
+        def load(self):
+            nonlocal loaded
+            loaded = True
+
+        async def synthesize(self, **kwargs):
+            synth_kwargs.append(kwargs)
+            Path(kwargs["out_path"]).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory",
+                        lambda n: FakeIndexBackend())
+    engine = TtsEngine()
+    engine.backend_status.connect(statuses.append)
+    chapters = [{"title": "第一章", "content": "甲。乙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=5000)
+    assert "loading" in statuses
+    assert "ready" in statuses
+    assert engine.backend_ready()
+    assert synth_kwargs and synth_kwargs[0]["emo_mode"] == "auto"
+    assert synth_kwargs[0]["emo_strength"] == 0.6
+    engine.stop()
+
+
+def test_engine_fallback_to_edge_on_load_failure(qtbot, monkeypatch):
+    """IndexTTS 加载失败：backend_status(error) → 自动切 edge → 重启会话继续播放。"""
+    statuses: list[str] = []
+
+    class FailingIndexBackend:
+        name = "indextts"
+
+        def is_available(self):
+            return True  # 模型可用但加载失败（如显存不足）
+
+        def is_loaded(self):
+            return False
+
+        def load(self):
+            raise TTSBackendError("模型加载失败: 显存不足")
+
+        async def synthesize(self, **kwargs):
+            raise AssertionError("不应走到 synthesize")
+
+    def factory(name):
+        if name == "edge":
+            return EdgeTTSBackend()
+        return FailingIndexBackend()
+
+    # edge 路径经模块级 synthesize_sentence 接缝合成（与现有测试一致）
+    async def fake_synthesize(sentence, voice, rate, out_path):
+        Path(out_path).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory", factory)
+    monkeypatch.setattr("core.tts_engine.synthesize_sentence", fake_synthesize)
+    engine = TtsEngine()
+    engine.backend_status.connect(statuses.append)
+    chapters = [{"title": "第一章", "content": "甲。乙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
+    qtbot.waitUntil(lambda: engine.backend() == "edge", timeout=5000)
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=5000)  # 会话已重启并继续播放
+    assert any(s.startswith("error:") for s in statuses)
+    assert engine.backend() == "edge"
+    assert engine.backend_ready()
+    engine.stop()
+
+
+def test_engine_set_backend_restarts_active_session(qtbot, monkeypatch):
+    """有会话时 set_backend 重启当前章节（新后端生效），且不重复启动。"""
+    synth_kwargs: list[dict] = []
+
+    class FakeBackend:
+        name = "fake"
+
+        async def synthesize(self, **kwargs):
+            synth_kwargs.append(kwargs)
+            Path(kwargs["out_path"]).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory", lambda n: FakeBackend())
+    engine = TtsEngine()
+    chapters = [{"title": "第一章", "content": "甲。乙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=5000)
+    worker_before = engine._worker
+    engine.set_backend("edge")
+    assert engine.backend() == "edge"
+    assert engine._worker is not worker_before  # 会话已重启（新 worker）
+    assert worker_before.isFinished()  # 旧 worker 已同步退役，无残留
+    engine.stop()
+
+
+def test_engine_set_emotion_kept_for_later_switch(qtbot, monkeypatch):
+    """set_emotion 在 edge 后端也保存参数，切回 indextts 时生效。"""
+    engine = TtsEngine()
+    engine.set_backend("edge")
+    engine.set_emotion("悲伤", 0.4)
+    assert engine._emotion_mode == "悲伤"
+    assert engine._emotion_strength == 0.4
+    engine.set_backend("indextts")
+    assert engine._emotion_mode == "悲伤"
+    assert engine._emotion_strength == 0.4
+
+
+# ---------- Task 6: play_chapters 透传 backend/emotion ----------
+
+
+def test_engine_play_chapters_accepts_backend_and_emotion_params(qtbot, fake_synth):
+    """play_chapters 的 backend/emotion 参数立即生效（UI 播放时透传控件值）。"""
+    engine = TtsEngine()
+    chapters = [{"title": "第一章", "content": "甲。乙。"}]
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%",
+                         backend="edge", emotion_mode="悲伤",
+                         emotion_strength=0.4)
+    assert engine.backend() == "edge"
+    assert engine._emotion_mode == "悲伤"
+    assert engine._emotion_strength == 0.4
+    engine.stop()
+
+
+def test_engine_play_chapters_passes_emotion_to_backend(qtbot, monkeypatch):
+    """play_chapters 传入的情感参数必须随会话透传到后端 synthesize。"""
+    synth_kwargs: list[dict] = []
+
+    class FakeBackend:
+        name = "fake"
+
+        async def synthesize(self, **kwargs):
+            synth_kwargs.append(kwargs)
+            Path(kwargs["out_path"]).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory", lambda n: FakeBackend())
+    engine = TtsEngine()
+    chapters = [{"title": "第一章", "content": "甲。乙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%",
+                         backend="indextts", emotion_mode="悲伤",
+                         emotion_strength=0.4)
+    assert engine.backend() == "indextts"
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=5000)
+    assert synth_kwargs and synth_kwargs[0]["emo_mode"] == "悲伤"
+    assert synth_kwargs[0]["emo_strength"] == 0.4
+    engine.stop()
+
+
+# ---------- Final review：播放中情感/引擎变更立即生效（设计 §5.4） ----------
+
+
+def test_engine_set_emotion_restarts_from_current_sentence_debounced(qtbot, monkeypatch):
+    """播放中修改情感：0.5s 防抖后从当前句重启（不回到章首）；连续修改只重启一次。"""
+    import threading
+    blocked = threading.Event()
+    release = threading.Event()
+
+    class FakeIndexBackend:
+        name = "indextts"
+
+        def is_available(self):
+            return True
+
+        def is_loaded(self):
+            return False
+
+        def load(self):
+            pass
+
+        async def synthesize(self, **kwargs):
+            if "sentence_00002" in str(kwargs["out_path"]):
+                blocked.set()
+                release.wait(15)  # 冻结在句 2 前：_next_index 在防抖窗口内保持稳定
+            Path(kwargs["out_path"]).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory",
+                        lambda n: FakeIndexBackend())
+    engine = TtsEngine()
+    chapters = [{"title": "第一章", "content": "甲。乙。丙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=5000)
+    engine._on_media_status(QMediaPlayer.MediaStatus.EndOfMedia)  # 播完句 0
+    qtbot.waitUntil(lambda: len(started) >= 2, timeout=5000)      # 当前句 = 1
+    assert blocked.wait(5)  # worker 冻结在句 2 → _next_index 稳定为 2
+
+    calls: list[tuple] = []
+    orig_start = engine._start_chapter
+
+    def spy(index, start_sentence=0):
+        calls.append((index, start_sentence))
+        orig_start(index, start_sentence)
+
+    engine._start_chapter = spy
+    # 快速连续修改（滑条连续触发）：防抖窗口内不得重启
+    engine.set_emotion("悲伤", 0.4)
+    engine.set_emotion("悲伤", 0.5)
+    engine.set_emotion("激昂", 0.6)
+    assert calls == []
+    qtbot.wait(600)
+    assert len(calls) == 1  # 防抖合并：只触发一次重启
+    assert calls[0] == (0, 1)  # 从当前句（索引 1）重启，而非章首 0
+    release.set()  # 放行被阻塞的 worker，确保线程安全收尾
+    engine.stop()
+    qtbot.waitUntil(lambda: not engine._retired_workers, timeout=5000)
+
+
+def test_engine_set_emotion_edge_backend_no_restart(qtbot, fake_synth):
+    """edge 后端忽略情感：播放中 set_emotion 不得触发重启。"""
+    engine = TtsEngine()
+    chapters = [{"title": "第一章", "content": "甲。乙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%",
+                         backend="edge")
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=5000)
+    calls: list[tuple] = []
+    orig_start = engine._start_chapter
+
+    def spy(index, start_sentence=0):
+        calls.append((index, start_sentence))
+        orig_start(index, start_sentence)
+
+    engine._start_chapter = spy
+    engine.set_emotion("悲伤", 0.5)
+    qtbot.wait(600)
+    assert calls == []  # edge 忽略情感，不重启
+    engine.stop()
+
+
+def test_engine_set_backend_restarts_from_current_sentence(qtbot, monkeypatch):
+    """播放中切换后端：从当前句重启（而非章首），不丢失播放进度。"""
+
+    class FakeBackend:
+        name = "fake"
+
+        async def synthesize(self, **kwargs):
+            Path(kwargs["out_path"]).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory", lambda n: FakeBackend())
+    engine = TtsEngine()
+    chapters = [{"title": "第一章", "content": "甲。乙。丙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=5000)
+    engine._on_media_status(QMediaPlayer.MediaStatus.EndOfMedia)
+    qtbot.waitUntil(lambda: len(started) >= 2, timeout=5000)  # 已播到句 1（或更后）
+    expected_start = max(0, engine._next_index - 1)  # 切换瞬间的"当前句"
+    assert expected_start >= 1  # 确实处于句中（非章首场景，能区分 0）
+    engine.set_backend("edge")
+    assert engine.backend() == "edge"
+    assert engine._worker is not None
+    assert engine._worker._start_index == expected_start  # 从当前句重启，而非章首 0
+    engine.stop()
+
+
+def test_engine_falls_back_to_edge_on_indextts_synthesis_failure(qtbot, monkeypatch):
+    """IndexTTS 本地合成失败（OOM/模型故障）→ 回退 edge → 重启会话继续播放。
+
+    与网络异常（edge 失败）区分：本地引擎失败走回退路径并提示切到 edge-tts。
+    """
+    statuses: list[str] = []
+    errors: list[str] = []
+
+    class FailingIndexBackend:
+        name = "indextts"
+
+        def is_available(self):
+            return True
+
+        def is_loaded(self):
+            return False
+
+        def load(self):
+            pass
+
+        async def synthesize(self, **kwargs):
+            raise TTSBackendError("CUDA out of memory")
+
+    def factory(name):
+        if name == "edge":
+            return EdgeTTSBackend()
+        return FailingIndexBackend()
+
+    async def fake_synthesize(sentence, voice, rate, out_path):
+        Path(out_path).write_bytes(b"fake-mp3")
+
+    monkeypatch.setattr("core.tts_engine._backend_factory", factory)
+    monkeypatch.setattr("core.tts_engine.synthesize_sentence", fake_synthesize)
+    engine = TtsEngine()
+    engine.backend_status.connect(statuses.append)
+    engine.error.connect(errors.append)
+    chapters = [{"title": "第一章", "content": "甲。乙。"}]
+    started: list[int] = []
+    engine.sentence_started.connect(started.append)
+    engine.play_chapters(chapters, start_index=0, voice="v", rate="+0%")
+    # 单句重试耗尽（3 次 × 0.8s 退避）→ 回退 edge → 会话重启继续播放
+    qtbot.waitUntil(lambda: engine.backend() == "edge", timeout=15000)
+    qtbot.waitUntil(lambda: len(started) >= 1, timeout=5000)
+    assert engine.backend() == "edge"
+    assert any("情感引擎合成失败" in e for e in errors)
+    assert any("CUDA out of memory" in e for e in errors)
+    assert any("edge-tts" in e for e in errors)
+    engine.stop()

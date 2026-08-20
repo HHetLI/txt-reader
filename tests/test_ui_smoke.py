@@ -99,6 +99,92 @@ def test_player_bar_status(qapp):
     assert bar._status.text() == "正在朗读：第一章"
 
 
+def test_player_bar_backend_default_indextts(qapp):
+    """设计默认：引擎下拉选中 IndexTTS2.5 情感。"""
+    bar = PlayerBar()
+    assert bar.backend() == "indextts"
+    assert bar._engine_combo.currentText() == "IndexTTS2.5 情感"
+
+
+def test_player_bar_emotion_defaults(qapp):
+    """情感默认：自动 + 强度 60%（0.0-1.0 浮点）。"""
+    bar = PlayerBar()
+    assert bar.emotion_mode() == "自动"
+    assert bar.emotion_strength() == 0.6
+    assert bar._strength.value() == 60
+
+
+def test_player_bar_backend_change_signal(qapp):
+    from PySide6.QtTest import QSignalSpy
+    bar = PlayerBar()
+    spy = QSignalSpy(bar.backend_changed)
+    bar._engine_combo.setCurrentIndex(1)  # edge-tts 快速
+    assert spy.count() == 1
+    assert spy.at(0)[0] == "edge"
+
+
+def test_player_bar_emotion_changed_signal(qapp):
+    """切换情感模式时携带 (mode, strength) 发射 emotion_changed。"""
+    from PySide6.QtTest import QSignalSpy
+    bar = PlayerBar()
+    spy = QSignalSpy(bar.emotion_changed)
+    bar._emotion.setCurrentIndex(2)  # 悲伤
+    assert spy.count() == 1
+    assert spy.at(0)[0] == "悲伤"
+    assert spy.at(0)[1] == 0.6
+
+
+def test_player_bar_strength_changed_signal(qapp):
+    """强度滑条变化发射 emotion_changed（0-100 映射 0.0-1.0）。"""
+    from PySide6.QtTest import QSignalSpy
+    bar = PlayerBar()
+    spy = QSignalSpy(bar.emotion_changed)
+    bar._strength.setValue(30)
+    assert spy.count() == 1
+    assert spy.at(0)[1] == 0.3
+    bar._strength.setValue(100)
+    assert spy.count() == 2
+    assert spy.at(1)[1] == 1.0
+
+
+def test_player_bar_emotion_controls_toggle_with_backend(qapp):
+    """情感控件随引擎联动：IndexTTS 可见可用，edge 隐藏禁用。"""
+    bar = PlayerBar()
+    # 默认 IndexTTS：可见可用
+    assert not bar._emotion.isHidden()
+    assert bar._emotion.isEnabled()
+    assert not bar._strength.isHidden()
+    assert bar._strength.isEnabled()
+    # 切到 edge：隐藏禁用
+    bar._engine_combo.setCurrentIndex(1)
+    assert bar._emotion.isHidden()
+    assert not bar._emotion.isEnabled()
+    assert bar._strength.isHidden()
+    assert not bar._strength.isEnabled()
+    # 切回 IndexTTS：恢复可见可用
+    bar._engine_combo.setCurrentIndex(0)
+    assert not bar._emotion.isHidden()
+    assert bar._emotion.isEnabled()
+    assert not bar._strength.isHidden()
+    assert bar._strength.isEnabled()
+
+
+def test_player_bar_emotion_presets(qapp):
+    """情感下拉包含全部预设，索引 0 为自动。"""
+    bar = PlayerBar()
+    texts = [bar._emotion.itemText(i) for i in range(bar._emotion.count())]
+    assert texts == ["自动", "平静", "悲伤", "激昂", "温柔", "恐惧", "高兴"]
+
+
+def test_player_bar_set_backend_status(qapp):
+    """set_backend_status 在状态栏显示后端加载进度。"""
+    bar = PlayerBar()
+    bar.set_backend_status("加载情感引擎…")
+    assert bar._status.text() == "加载情感引擎…"
+    bar.set_backend_status("就绪")
+    assert bar._status.text() == "就绪"
+
+
 from ui.main_window import MainWindow
 
 
@@ -228,6 +314,66 @@ def test_theme_applies_without_error(qapp):
     assert "#1b1e26" in qss  # 深色主背景
     apply_theme(qapp)
     assert qapp.styleSheet() == qss
+
+
+# ---------- Task 6: 参数透传 + 状态提示 ----------
+
+
+def test_main_window_backend_changed_wires_to_engine(qapp):
+    """引擎下拉切换 → backend_changed → engine.set_backend。"""
+    win = MainWindow()
+    assert win._engine.backend() == "indextts"  # 设计默认
+    win._player_bar._engine_combo.setCurrentIndex(1)  # edge-tts 快速
+    assert win._engine.backend() == "edge"
+    win._player_bar._engine_combo.setCurrentIndex(0)  # 切回 IndexTTS
+    assert win._engine.backend() == "indextts"
+
+
+def test_main_window_emotion_changed_wires_to_engine(qapp):
+    """情感模式/强度变化 → emotion_changed → engine.set_emotion。"""
+    win = MainWindow()
+    win._player_bar._emotion.setCurrentIndex(2)  # 悲伤
+    assert win._engine._emotion_mode == "悲伤"
+    assert win._engine._emotion_strength == 0.6
+    win._player_bar._strength.setValue(30)
+    assert win._engine._emotion_mode == "悲伤"
+    assert win._engine._emotion_strength == 0.3
+
+
+def test_main_window_backend_status_maps_to_status_label(qapp):
+    """engine.backend_status → 状态栏文案映射（loading/ready/error:）。"""
+    win = MainWindow()
+    win._engine.backend_status.emit("loading")
+    assert win._player_bar._status.text() == "正在加载情感引擎（首次约 2-4 分钟）…"
+    win._engine.backend_status.emit("ready")
+    assert win._player_bar._status.text() == "情感引擎就绪"
+    win._engine.backend_status.emit("error:IndexTTS2.5 模型加载失败")
+    assert win._player_bar._status.text() == "IndexTTS2.5 模型加载失败"
+
+
+def test_main_window_play_passes_backend_and_emotion(qapp):
+    """首次播放：play_chapters 必须携带引擎/情感控件当前值。"""
+    win = MainWindow()
+    win._chapters = [{"title": "第一章", "content": "甲。"}]
+    win._chapter_panel.set_chapters(["第一章"])
+    win._chapter_panel.select_chapter(0)
+    calls: list[tuple] = []
+
+    def spy_play(chapters, start_index=0, voice=None, rate=None,
+                 backend=None, emotion_mode=None, emotion_strength=None):
+        calls.append((start_index, voice, rate, backend,
+                      emotion_mode, emotion_strength))
+
+    win._engine.play_chapters = spy_play  # 记录透传参数，不真正播放
+    win._player_bar._engine_combo.setCurrentIndex(1)  # edge
+    win._player_bar._emotion.setCurrentIndex(2)       # 悲伤
+    win._player_bar._strength.setValue(30)
+    win._on_play_toggled()
+    assert calls, "play_chapters 未被调用"
+    _, _, _, backend, emo_mode, emo_strength = calls[-1]
+    assert backend == "edge"
+    assert emo_mode == "悲伤"
+    assert emo_strength == 0.3
 
 
 def test_reader_view_dark_style(qapp):

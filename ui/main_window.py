@@ -75,6 +75,10 @@ class MainWindow(QMainWindow):
         self._player_bar.stop_requested.connect(self._on_stop)
         self._player_bar.voice_changed.connect(self._on_voice_changed)
         self._player_bar.rate_changed.connect(self._on_rate_changed)
+        # Task 6：引擎/情感控件 → 引擎；引擎后端状态 → 状态栏
+        self._player_bar.backend_changed.connect(self._on_backend_changed)
+        self._player_bar.emotion_changed.connect(self._on_emotion_changed)
+        self._engine.backend_status.connect(self._on_backend_status)
         self._engine.playing.connect(self._player_bar.set_playing)
         self._engine.chapter_finished.connect(self._on_chapter_finished)
         self._engine.error.connect(
@@ -135,10 +139,15 @@ class MainWindow(QMainWindow):
         index = self._chapter_panel.current_index()
         if index < 0:
             index = 0
+        # 先更新状态栏再启动：play_chapters 内部可能同步发出后端回退 error 状态
+        # （如 IndexTTS 不可用自动切 edge），后置 set_status 会把它覆盖掉
+        self._player_bar.set_status(f"正在朗读：{self._chapters[index]['title']}")
         self._engine.play_chapters(
             self._chapters, start_index=index,
-            voice=self._player_bar.voice(), rate=self._player_bar.rate())
-        self._player_bar.set_status(f"正在朗读：{self._chapters[index]['title']}")
+            voice=self._player_bar.voice(), rate=self._player_bar.rate(),
+            backend=self._player_bar.backend(),
+            emotion_mode=self._player_bar.emotion_mode(),
+            emotion_strength=self._player_bar.emotion_strength())
 
     def _on_prev(self) -> None:
         if not self._chapters:
@@ -189,6 +198,28 @@ class MainWindow(QMainWindow):
     def _on_rate_changed(self, rate: str) -> None:
         if self._engine.is_playing():
             self._engine.set_rate(rate)
+
+    # ---------- Task 6：引擎/情感 参数透传 ----------
+
+    def _on_backend_changed(self, name: str) -> None:
+        """引擎下拉切换 → 即时切换后端（有会话时引擎会重启当前章节）。"""
+        self._engine.set_backend(name)
+
+    def _on_emotion_changed(self, mode: str, strength: float) -> None:
+        """情感模式/强度变化 → 保存到引擎（IndexTTS 模式生效）。"""
+        self._engine.set_emotion(mode, strength)
+
+    def _on_backend_status(self, text: str) -> None:
+        """引擎后端加载状态 → 状态栏文案：loading/ready/error:..."""
+        if text == "loading":
+            self._player_bar.set_backend_status(
+                "正在加载情感引擎（首次约 2-4 分钟）…")
+        elif text == "ready":
+            self._player_bar.set_backend_status("情感引擎就绪")
+        elif text.startswith("error:"):
+            self._player_bar.set_backend_status(text[len("error:"):])
+        else:
+            self._player_bar.set_backend_status(text)
 
     def _on_chapter_finished(self) -> None:
         idx = self._engine.current_chapter_index()

@@ -1,34 +1,87 @@
-"""深色护眼主题（暗色背景 + 柔和文字，适合长时间阅读/夜间）。"""
+"""阅读主题（深色 / 护眼绿 / 浅色），QSS 按主题参数化构建。"""
 
-# ---- 配色 ----
-BG_MAIN = "#1b1e26"        # 主窗口背景
-BG_PANEL = "#22262f"        # 面板/列表背景
-BG_READER = "#1e222b"       # 正文阅读区
-BG_INPUT = "#262b35"        # 下拉框/输入控件
-BG_HOVER = "#2c3240"        # 悬停
-BG_SELECT = "#3d4a63"       # 选中
-ACCENT = "#4f7cff"          # 强调色（播放/激活）
-TEXT_MAIN = "#d5dae3"       # 主文字
-TEXT_MUTED = "#8b93a3"      # 次要文字
-BORDER = "#2e3440"          # 边框
-MENU_BG = "#1e2129"         # 菜单栏背景
-SENTENCE_HL = "#8a7a42"     # 播放句子跟读高亮（暗金）
+# ---- 主题配色定义 ----
+# 每主题含：QSS 色板 + 正文/标题/高亮色（ReaderView 用）
+THEMES: dict[str, dict] = {
+    "deep": {
+        "label": "深色",
+        "bg_main": "#1b1e26",     # 主窗口背景
+        "bg_panel": "#22262f",    # 面板/列表背景
+        "bg_reader": "#1e222b",   # 正文阅读区
+        "bg_input": "#262b35",    # 下拉框/输入控件
+        "bg_hover": "#2c3240",    # 悬停
+        "bg_select": "#3d4a63",   # 选中
+        "accent": "#4f7cff",      # 强调色（播放/激活）
+        "text_main": "#d5dae3",   # 主文字
+        "text_muted": "#8b93a3",  # 次要文字
+        "border": "#2e3440",      # 边框
+        "menu_bg": "#1e2129",     # 菜单栏背景
+        "sentence_hl": "#8a7a42",  # 播放句子跟读高亮（暗金）
+        "reader_text": "#d5dae3",
+        "reader_title": "#7fa3ff",
+    },
+    "green": {
+        "label": "护眼绿",
+        "bg_main": "#1c2620",
+        "bg_panel": "#222e27",
+        "bg_reader": "#1e2a22",
+        "bg_input": "#27352c",
+        "bg_hover": "#2d3d32",
+        "bg_select": "#3d5a46",
+        "accent": "#5fb78a",
+        "text_main": "#c8d6c0",
+        "text_muted": "#8aa08f",
+        "border": "#2e3a32",
+        "menu_bg": "#1f2a24",
+        "sentence_hl": "#6e8a52",
+        "reader_text": "#c8d6c0",
+        "reader_title": "#7fd4a8",
+    },
+    "light": {
+        "label": "浅色",
+        "bg_main": "#f5f5f3",
+        "bg_panel": "#ececea",
+        "bg_reader": "#ffffff",
+        "bg_input": "#e9e9e6",
+        "bg_hover": "#e1e1dc",
+        "bg_select": "#c9d6f0",
+        "accent": "#3a6de0",
+        "text_main": "#2a2f3a",
+        "text_muted": "#8a8f99",
+        "border": "#d8d8d3",
+        "menu_bg": "#f0f0ee",
+        "sentence_hl": "#d9c86a",
+        "reader_text": "#2a2f3a",
+        "reader_title": "#3a6de0",
+    },
+}
+
+DEFAULT_THEME = "deep"
 
 
-def build_qss() -> str:
-    """返回应用级深色主题样式表。"""
+def theme_names() -> list[str]:
+    return list(THEMES)
+
+
+def theme_label(name: str) -> str:
+    return THEMES.get(name, THEMES[DEFAULT_THEME])["label"]
+
+
+def build_qss(theme: str = DEFAULT_THEME) -> str:
+    """按主题构建应用级样式表。"""
+    c = THEMES.get(theme, THEMES[DEFAULT_THEME])
     return f"""
 /* ===== 主窗口 ===== */
 QMainWindow, QWidget#centralRoot {{
-    background-color: {BG_MAIN};
-    color: {TEXT_MAIN};
+    background-color: {c['bg_main']};
+    color: {c['text_main']};
 }}
 
 /* ===== 菜单栏 ===== */
 QMenuBar {{
-    background-color: {MENU_BG};
-    color: {TEXT_MAIN};
-    border-bottom: 1px solid {BORDER};
+    background-color: {c['menu_bg']};
+    color: {c['text_main']};
+    border-bottom: 1px solid {c['border']};
     padding: 2px 4px;
 }}
 QMenuBar::item {{
@@ -37,12 +90,12 @@ QMenuBar::item {{
     border-radius: 4px;
 }}
 QMenuBar::item:selected {{
-    background-color: {BG_HOVER};
+    background-color: {c['bg_hover']};
 }}
 QMenu {{
-    background-color: {BG_PANEL};
-    color: {TEXT_MAIN};
-    border: 1px solid {BORDER};
+    background-color: {c['bg_panel']};
+    color: {c['text_main']};
+    border: 1px solid {c['border']};
     padding: 4px;
 }}
 QMenu::item {{
@@ -50,35 +103,38 @@ QMenu::item {{
     border-radius: 3px;
 }}
 QMenu::item:selected {{
-    background-color: {BG_SELECT};
+    background-color: {c['bg_select']};
+}}
+QMenu::item:disabled {{
+    color: {c['text_muted']};
 }}
 QMenu::separator {{
     height: 1px;
-    background: {BORDER};
+    background: {c['border']};
     margin: 4px 8px;
 }}
 
 /* ===== 章节选择对话框 ===== */
 QDialog {{
-    background-color: {BG_MAIN};
-    color: {TEXT_MAIN};
+    background-color: {c['bg_main']};
+    color: {c['text_main']};
 }}
 QLineEdit {{
-    background-color: {BG_INPUT};
-    color: {TEXT_MAIN};
-    border: 1px solid {BORDER};
+    background-color: {c['bg_input']};
+    color: {c['text_main']};
+    border: 1px solid {c['border']};
     border-radius: 5px;
     padding: 4px 8px;
     font-size: 12px;
-    selection-background-color: {BG_SELECT};
+    selection-background-color: {c['bg_select']};
 }}
 QLineEdit:focus {{
-    border-color: {ACCENT};
+    border-color: {c['accent']};
 }}
 QListWidget {{
-    background-color: {BG_PANEL};
-    color: {TEXT_MAIN};
-    border: 1px solid {BORDER};
+    background-color: {c['bg_panel']};
+    color: {c['text_main']};
+    border: 1px solid {c['border']};
     border-radius: 5px;
     outline: none;
     font-size: 12px;
@@ -89,68 +145,54 @@ QListWidget::item {{
     margin: 0 3px;
 }}
 QListWidget::item:hover {{
-    background-color: {BG_HOVER};
+    background-color: {c['bg_hover']};
 }}
 QListWidget::item:selected {{
-    background-color: {BG_SELECT};
-    color: #e8ecf5;
+    background-color: {c['bg_select']};
 }}
 
 /* ===== 按钮 ===== */
 QPushButton {{
-    background-color: {BG_INPUT};
-    color: {TEXT_MAIN};
-    border: 1px solid {BORDER};
+    background-color: {c['bg_input']};
+    color: {c['text_main']};
+    border: 1px solid {c['border']};
     border-radius: 5px;
     padding: 3px 8px;
     font-size: 12px;
 }}
 QPushButton:hover {{
-    background-color: {BG_HOVER};
-    border-color: #3a4152;
+    background-color: {c['bg_hover']};
+    border-color: {c['border']};
 }}
 QPushButton:pressed {{
-    background-color: {BG_SELECT};
+    background-color: {c['bg_select']};
 }}
 QPushButton:disabled {{
-    color: {TEXT_MUTED};
-    background-color: {BG_PANEL};
+    color: {c['text_muted']};
+    background-color: {c['bg_panel']};
 }}
 QPushButton#playBtn {{
-    background-color: {ACCENT};
-    border-color: {ACCENT};
+    background-color: {c['accent']};
+    border-color: {c['accent']};
     color: #ffffff;
     font-size: 13px;
 }}
 QPushButton#playBtn:hover {{
-    background-color: #5f89ff;
-}}
-/* ===== 正文搜索工具条 ===== */
-QWidget#searchBar {{
-    background-color: {BG_PANEL};
-    border-bottom: 1px solid {BORDER};
-}}
-QLabel#searchCount {{
-    color: {TEXT_MUTED};
-    min-width: 48px;
-}}
-QPushButton#searchNav, QPushButton#searchClose {{
-    padding: 2px;
-    font-size: 12px;
+    background-color: {c['accent']};
 }}
 
 /* ===== 下拉框 ===== */
 QComboBox {{
-    background-color: {BG_INPUT};
-    color: {TEXT_MAIN};
-    border: 1px solid {BORDER};
+    background-color: {c['bg_input']};
+    color: {c['text_main']};
+    border: 1px solid {c['border']};
     border-radius: 5px;
     padding: 2px 6px;
     font-size: 12px;
     min-height: 18px;
 }}
 QComboBox:hover {{
-    border-color: #3a4152;
+    border-color: {c['border']};
 }}
 QComboBox::drop-down {{
     border: none;
@@ -160,33 +202,51 @@ QComboBox::down-arrow {{
     image: none;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-top: 5px solid {TEXT_MUTED};
+    border-top: 5px solid {c['text_muted']};
     margin-right: 4px;
 }}
 QComboBox QAbstractItemView {{
-    background-color: {BG_PANEL};
-    color: {TEXT_MAIN};
-    border: 1px solid {BORDER};
-    selection-background-color: {BG_SELECT};
+    background-color: {c['bg_panel']};
+    color: {c['text_main']};
+    border: 1px solid {c['border']};
+    selection-background-color: {c['bg_select']};
     outline: none;
 }}
 
 /* ===== 标签 ===== */
 QLabel {{
-    color: {TEXT_MAIN};
+    color: {c['text_main']};
     font-size: 12px;
 }}
 QLabel#statusLabel {{
-    color: {TEXT_MUTED};
+    color: {c['text_muted']};
+}}
+QLabel#sentenceProgress {{
+    color: {c['text_muted']};
+    min-width: 56px;
+}}
+
+/* ===== 正文搜索工具条 ===== */
+QWidget#searchBar {{
+    background-color: {c['bg_panel']};
+    border-bottom: 1px solid {c['border']};
+}}
+QLabel#searchCount {{
+    color: {c['text_muted']};
+    min-width: 48px;
+}}
+QPushButton#searchNav, QPushButton#searchClose {{
+    padding: 2px;
+    font-size: 12px;
 }}
 
 /* ===== 正文阅读区 ===== */
 QTextBrowser {{
-    background-color: {BG_READER};
-    color: {TEXT_MAIN};
+    background-color: {c['bg_reader']};
+    color: {c['text_main']};
     border: none;
     font-size: 16px;
-    selection-background-color: {BG_SELECT};
+    selection-background-color: {c['bg_select']};
 }}
 QTextBrowser QScrollBar:vertical {{
     background: transparent;
@@ -194,12 +254,12 @@ QTextBrowser QScrollBar:vertical {{
     margin: 0;
 }}
 QTextBrowser QScrollBar::handle:vertical {{
-    background: #333a47;
+    background: {c['border']};
     border-radius: 4px;
     min-height: 24px;
 }}
 QTextBrowser QScrollBar::handle:vertical:hover {{
-    background: #3d4657;
+    background: {c['bg_select']};
 }}
 QTextBrowser QScrollBar::add-line:vertical,
 QTextBrowser QScrollBar::sub-line:vertical {{
@@ -217,12 +277,12 @@ QScrollBar:vertical {{
     margin: 0;
 }}
 QScrollBar::handle:vertical {{
-    background: #333a47;
+    background: {c['border']};
     border-radius: 4px;
     min-height: 24px;
 }}
 QScrollBar::handle:vertical:hover {{
-    background: #3d4657;
+    background: {c['bg_select']};
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0;
@@ -230,9 +290,16 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
     background: transparent;
 }}
+
+/* ===== 系统托盘菜单 ===== */
+QMenu#trayMenu {{
+    background-color: {c['bg_panel']};
+    color: {c['text_main']};
+    border: 1px solid {c['border']};
+}}
 """
 
 
-def apply_theme(app) -> None:
-    """将深色主题应用到整个应用。"""
-    app.setStyleSheet(build_qss())
+def apply_theme(app, theme: str = DEFAULT_THEME) -> None:
+    """将指定主题应用到整个应用。"""
+    app.setStyleSheet(build_qss(theme))

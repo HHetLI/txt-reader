@@ -1,12 +1,16 @@
 import html
 
+from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QTextBrowser, QTextEdit
 
-from ui.theme import ACCENT, BG_SELECT, SENTENCE_HL, TEXT_MAIN
+from ui.theme import DEFAULT_THEME, THEMES
 
 
 class ReaderView(QTextBrowser):
+    prev_requested = Signal()
+    next_requested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setOpenLinks(False)
@@ -14,63 +18,118 @@ class ReaderView(QTextBrowser):
         self._line_spacing = 1.6
         self.setFrameShape(self.Shape.NoFrame)
         self.setViewportMargins(30, 18, 30, 18)  # 左右留白，紧凑不空旷
-        self._apply_style()
+        self._theme = DEFAULT_THEME
+        self._text_color = THEMES[DEFAULT_THEME]["reader_text"]
+        self._title_color = THEMES[DEFAULT_THEME]["reader_title"]
         self.setPlaceholderText("打开一个 txt 小说文件开始阅读")
+
+        # 正文渲染映射：渲染文档与 content 字符 1:1（\n → 段落边界 U+2029）
+        self._body_start = 0  # 正文首字符的文档位置
+        self._body_len = 0    # 正文渲染长度（= len(content)）
 
         # ---------- 搜索状态 ----------
         self._search_text = ""
         self._matches: list[tuple[int, int]] = []  # (起始位置, 长度)
         self._current_match = -1
         self._match_fmt = QTextCharFormat()
-        self._match_fmt.setBackground(QColor(BG_SELECT))
         self._current_fmt = QTextCharFormat()
-        self._current_fmt.setBackground(QColor(ACCENT))
         self._current_fmt.setForeground(QColor("#ffffff"))
 
         # ---------- 播放句子跟读高亮 ----------
         self._sentence_sel: QTextEdit.ExtraSelection | None = None
-        self._sentence_anchor = -1  # 上次句子高亮结束位置，避免重复句子定位到开头
         self._sentence_fmt = QTextCharFormat()
-        self._sentence_fmt.setBackground(QColor(SENTENCE_HL))
+
+        self._apply_theme_colors()
+        self._apply_style()
+        self.anchorClicked.connect(self._on_anchor)
+
+    def _apply_theme_colors(self) -> None:
+        """按当前主题设置正文/标题/高亮配色。"""
+        colors = THEMES.get(self._theme, THEMES[DEFAULT_THEME])
+        self._text_color = colors["reader_text"]
+        self._title_color = colors["reader_title"]
+        self._match_fmt.setBackground(QColor(colors["bg_select"]))
+        self._current_fmt.setBackground(QColor(colors["accent"]))
+        self._sentence_fmt.setBackground(QColor(colors["sentence_hl"]))
+        self._render_selections()
+
+    def set_theme(self, theme_name: str) -> None:
+        """阅读主题切换：更新正文/标题/高亮配色。"""
+        self._theme = theme_name
+        self._apply_theme_colors()
+        self._apply_style()
 
     def _apply_style(self) -> None:
         font = self.font()
         font.setPointSize(self._font_size)
         self.setFont(font)
-        # 深色主题：正文文字浅色、标题带强调色
+        # 主题配色：正文文字浅色、标题带强调色
         self.document().setDefaultStyleSheet(
-            f"body {{ font-size: {self._font_size}pt; color: #d5dae3; }}"
-            f"h1 {{ color: #7fa3ff; font-size: {self._font_size + 4}pt; }}"
+            f"body {{ font-size: {self._font_size}pt; color: {self._text_color}; }}"
+            f"h1 {{ color: {self._title_color}; font-size: {self._font_size + 4}pt; }}"
         )
 
     def show_chapter(self, title: str, content: str) -> None:
-        body = html.escape(content).replace("\n", "<br>")
-        self.setHtml(f"<h1>{html.escape(title)}</h1><br>{body}")
-        self._apply_line_spacing()
+        # 每行一个 <p> 段落：\n → 段落边界，与 content 字符 1:1 映射
+        paras = "".join(f"<p>{html.escape(line)}</p>" for line in content.split("\n"))
+        self.setHtml(f"<h1>{html.escape(title)}</h1>{paras}")
+        doc = self.document()
+        block1 = doc.findBlockByNumber(1)
+        self._body_start = (block1.position()
+                            if block1.isValid() else doc.characterCount() - 1)
+        self._body_len = len(content)
+        self._apply_paragraph_style()
+        self._append_nav()
         self.verticalScrollBar().setValue(0)
         # 正文已变更：旧搜索高亮/句子高亮失效
         self._search_text = ""
         self._matches = []
         self._current_match = -1
         self._sentence_sel = None
-        self._sentence_anchor = -1
         self.setExtraSelections([])
 
-    def _apply_line_spacing(self) -> None:
-        block_fmt = QTextBlockFormat()
-        block_fmt.setLineHeight(self._line_spacing * 100,
-                                QTextBlockFormat.ProportionalHeight.value)
+    def _apply_paragraph_style(self) -> None:
+        """中文排版：正文每段首行缩进 2 字符 + 段间距 + 行距（标题/章末导航不处理）。"""
+        indent = float(self._font_size * 2)
+        end_pos = self._body_start + self._body_len
+        doc = self.document()
+        cursor = QTextCursor(doc)
+        block = doc.begin().next()  # 跳过标题 block
+        while block.isValid() and block.position() < end_pos:
+            fmt = QTextBlockFormat()
+            fmt.setTextIndent(indent)
+            fmt.setTopMargin(self._font_size * 0.4)
+            fmt.setBottomMargin(self._font_size * 0.4)
+            fmt.setLineHeight(self._line_spacing * 100,
+                              QTextBlockFormat.ProportionalHeight.value)
+            cursor.setPosition(block.position())
+            cursor.setBlockFormat(fmt)
+            block = block.next()
+
+    def _append_nav(self) -> None:
+        """章末导航：上一章 / 下一章（anchorClicked 处理）。"""
         cursor = QTextCursor(self.document())
-        cursor.select(QTextCursor.Document)
-        cursor.mergeBlockFormat(block_fmt)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertHtml(
+            '<p style="text-align:center; margin-top:24px; color:#8b93a3;">'
+            '<a href="prev">← 上一章</a>　|　'
+            '<a href="next">下一章 →</a></p>')
+
+    def _on_anchor(self, url) -> None:
+        href = url.toString() if hasattr(url, "toString") else str(url)
+        if href == "prev":
+            self.prev_requested.emit()
+        elif href == "next":
+            self.next_requested.emit()
 
     def set_font_size(self, pt: int) -> None:
         self._font_size = pt
         self._apply_style()
+        self._apply_paragraph_style()
 
     def set_line_spacing(self, ratio: float) -> None:
         self._line_spacing = ratio
-        self._apply_line_spacing()
+        self._apply_paragraph_style()
 
     def scroll_value(self) -> int:
         return self.verticalScrollBar().value()
@@ -117,45 +176,38 @@ class ReaderView(QTextBrowser):
 
     # ---------- 播放句子跟读高亮 ----------
 
-    def highlight_sentence(self, text: str) -> bool:
-        """高亮正在播放的句子。
-
-        从上次句子位置向后查找（句子顺序播放，避免重复文本定位到开头）；
-        找不到则从头查找（换章/回绕）。正文换行符 \n 在渲染文档中是
-        U+2028，需归一化后再匹配。返回是否定位成功。
-        """
-        if not text:
+    def highlight_sentence_range(self, start: int, end: int) -> bool:
+        """高亮正文中 [start, end) 字符偏移对应的句子（相对 content）。"""
+        if end <= start or start < 0:
             return False
-        search = text.replace("\r", "\u2028").replace("\n", "\u2028")
-        doc = self.document()
-        cursor = QTextCursor(doc)
-        if self._sentence_anchor > 0:
-            cursor.setPosition(self._sentence_anchor)
-        found = doc.find(search, cursor)
-        if found.isNull() and self._sentence_anchor > 0:
-            found = doc.find(search)  # 从头找（换章/循环播放）
-        if found.isNull():
+        lo = self._body_start + start
+        hi = self._body_start + end
+        doc_len = self.document().characterCount()
+        if lo < 0 or hi > doc_len:
             return False
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(lo)
+        cursor.setPosition(hi, QTextCursor.MoveMode.KeepAnchor)
         sel = QTextEdit.ExtraSelection()
-        sel.cursor = found
+        sel.cursor = cursor
         sel.format = self._sentence_fmt
         self._sentence_sel = sel
-        self._sentence_anchor = found.selectionEnd()
         self._render_selections()
         return True
 
     def clear_sentence_highlight(self) -> None:
         """清除播放句子高亮（停止/切书时）。"""
         self._sentence_sel = None
-        self._sentence_anchor = -1
         self._render_selections()
+
+    # ---------- 内部 ----------
 
     def _collect_matches(self) -> None:
         """从文档开头收集全部匹配位置（不区分大小写，不找重叠）。"""
         self._matches = []
         self._current_match = -1
         if not self._search_text:
-            self.setExtraSelections([])
+            self._render_selections()
             return
         doc = self.document()
         cursor = QTextCursor(doc)

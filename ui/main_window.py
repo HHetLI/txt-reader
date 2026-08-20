@@ -1,20 +1,25 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtGui import (QCloseEvent, QIcon, QKeySequence, QShortcut)
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QComboBox,
                                QDialog, QFileDialog, QLineEdit, QMainWindow,
-                               QMessageBox, QVBoxLayout, QWidget)
+                               QMenu, QMessageBox, QSystemTrayIcon, QVBoxLayout,
+                               QWidget)
 
 from core.chapter_splitter import split_chapters
 from core.encoding import read_text_file
 from core.progress_store import load_progress, save_progress
+from core.settings_store import (load_settings, recent_books, save_settings,
+                                 update_recent_book)
 from core.tts_engine import TtsEngine
 from ui.chapter_dialog import ChapterDialog
 from ui.player_bar import PlayerBar
 from ui.reader_view import ReaderView
 from ui.search_bar import SearchBar
-from ui.theme import apply_theme
+from ui.theme import apply_theme, theme_label, theme_names
+
+_ICON_PATH = Path(__file__).resolve().parent.parent / "resources" / "icon.png"
 
 
 class MainWindow(QMainWindow):
@@ -22,7 +27,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("小说阅读听书")
         self.resize(1000, 700)
-        apply_theme(self)  # 深色主题（QSS 作用到整个应用）
+
+        self._app_icon = (QIcon(str(_ICON_PATH))
+                          if _ICON_PATH.exists() else QIcon())
+        self.setWindowIcon(self._app_icon)
+
+        settings = load_settings()
+        self._theme = settings.get("theme", "deep")
 
         self._engine = TtsEngine(self)
         self._chapters: list[dict] = []
@@ -48,6 +59,12 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._setup_shortcuts()
         self._connect_signals()
+        self._apply_theme(self._theme, persist=False)
+        self._restore_window_state(settings)
+        self._setup_tray()
+        self._refresh_recent_menu()
+
+    # ---------- 菜单 ----------
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -56,9 +73,11 @@ class MainWindow(QMainWindow):
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.open_file)
         file_menu.addSeparator()
+        self._recent_menu = file_menu.addMenu("最近打开")
+        file_menu.addSeparator()
         quit_action = file_menu.addAction("退出")
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
-        quit_action.triggered.connect(self.close)
+        quit_action.triggered.connect(self._quit_app)
 
         # 播放控制（快捷键同款，便于键盘用户）
         play_menu = menu.addMenu("播放")
@@ -85,6 +104,16 @@ class MainWindow(QMainWindow):
         next_action.triggered.connect(self._on_next)
 
         settings_menu = menu.addMenu("设置")
+        theme_menu = settings_menu.addMenu("主题")
+        self._theme_actions: list = []
+        for name in theme_names():
+            act = theme_menu.addAction(theme_label(name))
+            act.setCheckable(True)
+            act.setData(name)
+            act.triggered.connect(
+                lambda checked=False, n=name: self._apply_theme(n))
+            self._theme_actions.append(act)
+        settings_menu.addSeparator()
         settings_menu.addAction("字号 +\tCtrl+=").triggered.connect(
             lambda: self._zoom_font(1))
         settings_menu.addAction("字号 -\tCtrl+-").triggered.connect(
@@ -100,12 +129,26 @@ class MainWindow(QMainWindow):
         settings_menu.addAction("在正文中搜索\tCtrl+F").triggered.connect(self._open_search)
         settings_menu.addAction("全屏\tF11").triggered.connect(self._toggle_fullscreen)
 
+    def _refresh_recent_menu(self) -> None:
+        """刷新『最近打开』子菜单。"""
+        self._recent_menu.clear()
+        books = recent_books()
+        if not books:
+            none_act = self._recent_menu.addAction("（无）")
+            none_act.setEnabled(False)
+            return
+        for path in books:
+            act = self._recent_menu.addAction(Path(path).name)
+            act.setToolTip(path)
+            act.triggered.connect(
+                lambda checked=False, p=path: self._load_book(p))
+
+    # ---------- 快捷键 ----------
+
     def _setup_shortcuts(self) -> None:
         """全局快捷键：播放控制 / 搜索 / 字号 / 全屏。"""
-        # 播放控制
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._on_space_shortcut)
         QShortcut(QKeySequence("Ctrl+S"), self, self._on_stop)
-        # 搜索
         QShortcut(QKeySequence.StandardKey.Find, self, self._open_search)
         QShortcut(QKeySequence(Qt.Key.Key_F3), self, self._on_find_next)
         # Esc 关闭搜索：输入框和正文区聚焦时均生效
@@ -113,18 +156,15 @@ class MainWindow(QMainWindow):
                   self._close_search)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self._reader,
                   self._close_search)
-        # 字号
         QShortcut(QKeySequence.StandardKey.ZoomIn, self,
                   lambda: self._zoom_font(1))
         QShortcut(QKeySequence.StandardKey.ZoomOut, self,
                   lambda: self._zoom_font(-1))
         QShortcut(QKeySequence("Ctrl+0"), self, self._reset_font)
-        # 行距
         QShortcut(QKeySequence("Ctrl+Shift+="), self,
                   lambda: self._reader.set_line_spacing(round(self._reader._line_spacing + 0.2, 1)))
         QShortcut(QKeySequence("Ctrl+Shift+-"), self,
                   lambda: self._reader.set_line_spacing(max(1.0, round(self._reader._line_spacing - 0.2, 1))))
-        # 全屏
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, self._toggle_fullscreen)
 
     def _on_space_shortcut(self) -> None:
@@ -145,6 +185,82 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showFullScreen()
+
+    # ---------- 主题 / 窗口状态 ----------
+
+    def _apply_theme(self, name: str, persist: bool = True) -> None:
+        """切换阅读主题：应用 QSS + 阅读器配色；持久化。"""
+        self._theme = name
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, name)
+        self._reader.set_theme(name)
+        for act in self._theme_actions:
+            act.setChecked(act.data() == name)
+        if persist:
+            save_settings(theme=name)
+
+    def _restore_window_state(self, settings: dict) -> None:
+        """恢复上次窗口大小/位置（settings 存储 hex 几何）。"""
+        from PySide6.QtCore import QByteArray
+        geo = settings.get("window_geometry")
+        if geo:
+            self.restoreGeometry(QByteArray.fromHex(bytes.fromhex(geo)))
+        state = settings.get("window_state")
+        if state:
+            self.restoreState(QByteArray.fromHex(bytes.fromhex(state)))
+
+    def _save_window_state(self) -> None:
+        """保存窗口几何状态（hex 编码，JSON 可存）。"""
+        geo = self.saveGeometry()
+        state = self.saveState()
+        save_settings(
+            window_geometry=bytes(geo.toHex()).decode() if geo else None,
+            window_state=bytes(state.toHex()).decode() if state else None,
+        )
+
+    # ---------- 系统托盘 ----------
+
+    def _setup_tray(self) -> None:
+        """系统托盘：关窗最小化到托盘，托盘菜单控制播放/退出。"""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray = None
+            return
+        self._tray = QSystemTrayIcon(self._app_icon, self)
+        menu = QMenu(self)
+        menu.setObjectName("trayMenu")
+        menu.addAction("显示主窗口").triggered.connect(self._show_main)
+        menu.addSeparator()
+        menu.addAction("播放/暂停").triggered.connect(self._on_play_toggled)
+        menu.addAction("上一章").triggered.connect(self._on_prev)
+        menu.addAction("下一章").triggered.connect(self._on_next)
+        menu.addAction("停止").triggered.connect(self._on_stop)
+        menu.addSeparator()
+        menu.addAction("退出").triggered.connect(self._quit_app)
+        self._tray.setContextMenu(menu)
+        self._tray.setToolTip("小说阅读听书")
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._show_main()
+
+    def _show_main(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_app(self) -> None:
+        """真正退出：保存进度与窗口状态，隐藏托盘。"""
+        self._engine.stop()
+        self._save_progress()
+        self._save_window_state()
+        if self._tray is not None:
+            self._tray.hide()
+        QApplication.quit()
+
+    # ---------- 信号连接 ----------
 
     def _connect_signals(self) -> None:
         self._player_bar.play_toggled.connect(self._on_play_toggled)
@@ -169,13 +285,19 @@ class MainWindow(QMainWindow):
         self._search_bar.find_prev_requested.connect(self._on_find_prev)
         self._search_bar.closed.connect(self._close_search)
 
+        # 章末导航：上一章 / 下一章
+        self._reader.prev_requested.connect(self._on_prev)
+        self._reader.next_requested.connect(self._on_next)
+
     # ---------- 文件 ----------
 
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "打开小说", "", "文本文件 (*.txt);;所有文件 (*.*)")
-        if not path:
-            return
+        if path:
+            self._load_book(path)
+
+    def _load_book(self, path: str) -> None:
         try:
             text = read_text_file(path)
         except Exception as exc:  # noqa: BLE001
@@ -191,8 +313,11 @@ class MainWindow(QMainWindow):
         self._show_chapter(index)
         self._reader.restore_scroll(progress.get("scroll", 0))
         self._save_progress()  # 恢复滚动后重存进度，避免把 scroll=0 覆盖回存档
+        update_recent_book(self._book_path)
+        self._refresh_recent_menu()
         name = Path(path).name
         self._player_bar.set_status(f"已打开：{name}（{len(self._chapters)} 章）")
+        self._player_bar.set_sentence_progress(0, 0)
 
     def _show_chapter(self, index: int) -> None:
         chapter = self._chapters[index]
@@ -308,6 +433,7 @@ class MainWindow(QMainWindow):
     def _on_stop(self) -> None:
         self._engine.stop()
         self._player_bar.set_status("已停止")
+        self._player_bar.set_sentence_progress(0, 0)
 
     def _on_voice_changed(self, voice: str) -> None:
         # 无条件透传：引擎 set_voice 内部按后端映射（edge→voice，
@@ -348,9 +474,10 @@ class MainWindow(QMainWindow):
                 self._player_bar.set_status(f"正在朗读：{self._chapters[idx]['title']}")
             else:
                 self._player_bar.set_status("全部朗读完毕")
+                self._player_bar.set_sentence_progress(0, 0)
 
     def _on_sentence_started(self, idx: int) -> None:
-        """播放句子 → 高亮正文中对应句子（跟读）。
+        """播放句子 → 高亮正文中对应句子（跟读）+ 显示句级进度。
 
         仅当视图章节与引擎播放章节一致时高亮：用户播放中跳到别的章节
         （菜单跳转）时视图与听书位置不一致，跳过避免错位。
@@ -359,11 +486,25 @@ class MainWindow(QMainWindow):
             return
         if self._engine.current_chapter_index() != self._current_chapter:
             return
-        text = self._engine.sentence_text(idx)
-        if text:
-            self._reader.highlight_sentence(text)
+        rng = self._engine.sentence_range(idx)
+        if rng:
+            self._reader.highlight_sentence_range(*rng)
+        total = self._engine.sentence_count()
+        if total > 0:
+            self._player_bar.set_sentence_progress(idx + 1, total)
+
+    # ---------- 退出 ----------
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._engine.stop()
         self._save_progress()
-        super().closeEvent(event)
+        if self._tray is not None:
+            # 关窗 → 最小化到托盘：听书后台继续
+            event.ignore()
+            self.hide()
+            self._tray.showMessage(
+                "小说阅读听书", "已最小化到系统托盘，听书继续播放。",
+                QSystemTrayIcon.MessageIcon.Information, 2000)
+        else:
+            self._save_window_state()
+            super().closeEvent(event)

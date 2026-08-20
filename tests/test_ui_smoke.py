@@ -33,16 +33,41 @@ def test_reader_view_escapes_html_content(qapp):
 
 
 def test_reader_view_line_spacing_sets_block_height(qapp):
-    """行距必须真正落到 QTextBlockFormat 的 lineHeight 上（CSS 在 Qt rich text 中无效）。"""
+    """行距必须真正落到正文段 QTextBlockFormat 的 lineHeight 上（CSS 无效）。"""
     from PySide6.QtGui import QTextBlockFormat
 
     view = ReaderView()
     view.show_chapter("标题", "第一行\n第二行")
     view.set_line_spacing(2.0)
-    block = view.document().begin()
+    block = view.document().begin().next()  # 标题之后的正文段
     fmt = block.blockFormat()
     assert fmt.lineHeight() == 200.0
     assert fmt.lineHeightType() == QTextBlockFormat.ProportionalHeight.value
+
+
+def test_reader_view_paragraph_indent(qapp):
+    """中文排版：正文段首行缩进 2 字符，标题段不缩进。"""
+    view = ReaderView()
+    view.show_chapter("标题", "第一段\n第二段")
+    title_fmt = view.document().begin().blockFormat()
+    body_fmt = view.document().begin().next().blockFormat()
+    assert title_fmt.textIndent() == 0.0
+    assert body_fmt.textIndent() > 0.0
+
+
+def test_reader_view_nav_links_and_signals(qapp):
+    """章末导航：正文末尾含上一章/下一章链接，点击触发信号。"""
+    from PySide6.QtTest import QSignalSpy
+    view = ReaderView()
+    view.show_chapter("标题", "正文内容")
+    assert "上一章" in view.toPlainText()
+    assert "下一章" in view.toPlainText()
+    prev_spy = QSignalSpy(view.prev_requested)
+    next_spy = QSignalSpy(view.next_requested)
+    view._on_anchor("prev")
+    view._on_anchor("next")
+    assert prev_spy.count() == 1
+    assert next_spy.count() == 1
 
 
 # ---------- 正文搜索（Ctrl+F） ----------
@@ -156,37 +181,41 @@ def test_search_bar_close_signal(qapp):
 # ---------- 播放句子跟读高亮 ----------
 
 
-def test_reader_view_highlight_sentence(qapp):
+def test_reader_view_highlight_sentence_range(qapp):
+    """按字符偏移高亮句子（渲染文档与 content 1:1 映射）。"""
     view = ReaderView()
     view.show_chapter("第一章", "风起云涌。风起云涌。")
-    assert view.highlight_sentence("风起云涌。") is True
+    assert view.highlight_sentence_range(0, 5) is True
     assert view._sentence_sel is not None
-    assert view._sentence_anchor >= 0
 
 
 def test_reader_view_highlight_sentence_cross_line(qapp):
-    """跨行句子：\n 在渲染文档中是 U+2028，归一化后必须能匹配。"""
+    """跨行句子（\n → 段落边界 U+2029）：偏移区间跨段仍能高亮。"""
     view = ReaderView()
     view.show_chapter("第一章", "第一行开头\n第二行结尾。")
-    assert view.highlight_sentence("第一行开头\n第二行结尾。") is True
-    assert view._sentence_sel is not None
+    # 句子 "第一行开头\n第二行结尾。" 在 content 中偏移 [0, 11)
+    assert view.highlight_sentence_range(0, 11) is True
+    sel = view._sentence_sel.cursor
+    assert sel.selectionEnd() - sel.selectionStart() == 11
 
 
-def test_reader_view_highlight_anchor_advances(qapp):
-    """重复句子：从上次位置向后找，第二句定位到第二处而非开头。"""
+def test_reader_view_highlight_sentence_offset_maps_to_document(qapp):
+    """偏移 → 文档位置映射正确：body_start + offset。"""
     view = ReaderView()
-    view.show_chapter("第一章", "风起。风起。")
-    assert view.highlight_sentence("风起。") is True
-    first_start = view._sentence_sel.cursor.selectionStart()
-    assert view.highlight_sentence("风起。") is True
-    second_start = view._sentence_sel.cursor.selectionStart()
-    assert second_start > first_start
+    view.show_chapter("标题一二", "甲乙\n丙丁")
+    assert view.highlight_sentence_range(2, 4) is True  # "丙丁"
+    sel = view._sentence_sel.cursor
+    # content[2]=丙 的文档位置 = body_start + 2
+    assert sel.selectionStart() == view._body_start + 2
 
 
-def test_reader_view_highlight_no_match(qapp):
+def test_reader_view_highlight_sentence_out_of_range(qapp):
+    """越界/非法区间返回 False，不高亮。"""
     view = ReaderView()
     view.show_chapter("第一章", "甲乙丙")
-    assert view.highlight_sentence("不存在的句子") is False
+    assert view.highlight_sentence_range(-1, 2) is False
+    assert view.highlight_sentence_range(0, 0) is False
+    assert view.highlight_sentence_range(0, 999) is False
     assert view._sentence_sel is None
 
 
@@ -194,7 +223,7 @@ def test_reader_view_sentence_and_search_coexist(qapp):
     """跟读高亮与搜索高亮并存互不覆盖。"""
     view = ReaderView()
     view.show_chapter("第一章", "风起云涌。风起云涌。")
-    view.highlight_sentence("风起云涌。")
+    view.highlight_sentence_range(0, 5)
     view.search("风起")  # 2 个搜索匹配
     # 搜索 2 个 + 句子 1 个 = 3 个 extra selections
     assert len(view.extraSelections()) == 3
@@ -211,7 +240,7 @@ def test_reader_view_sentence_cleared_on_show_chapter(qapp):
     """换章后跟读高亮失效（正文已变更）。"""
     view = ReaderView()
     view.show_chapter("第一章", "甲乙甲")
-    view.highlight_sentence("甲乙甲")
+    view.highlight_sentence_range(0, 3)
     assert view._sentence_sel is not None
     view.show_chapter("第二章", "丙丁")
     assert view._sentence_sel is None
@@ -457,6 +486,79 @@ def test_main_window_has_play_menu(qapp):
     assert "播放" in titles
 
 
+# ---------- 主题 / 最近打开 / 窗口状态 / 章末导航 ----------
+
+
+def test_main_window_theme_switch(qapp, monkeypatch):
+    """切换主题：QSS 应用 + 阅读器配色更新 + 设置持久化。"""
+    import core.settings_store as settings_store
+    import ui.main_window
+    win = MainWindow()
+    assert win._theme == "deep"
+    win._apply_theme("green")
+    assert win._reader._theme == "green"
+    assert settings_store.load_settings().get("theme") == "green"
+    # 菜单勾选跟随
+    checked = [a.data() for a in win._theme_actions if a.isChecked()]
+    assert checked == ["green"]
+
+
+def test_main_window_theme_restored_from_settings(qapp, monkeypatch):
+    """启动时从设置恢复上次主题。"""
+    import core.settings_store as settings_store
+    import ui.main_window
+    # main_window 通过 `from core.settings_store import load_settings` 导入时
+    # 绑定自己的引用，必须同时替换才能让 MainWindow 读到 mock 数据
+    monkeypatch.setattr(
+        ui.main_window, "load_settings",
+        lambda: {"theme": "light", "recent_books": [],
+                 "window_geometry": None, "window_state": None})
+    monkeypatch.setattr(
+        settings_store, "load_settings",
+        lambda: {"theme": "light", "recent_books": [],
+                 "window_geometry": None, "window_state": None})
+    win = MainWindow()
+    assert win._theme == "light"
+    assert win._reader._theme == "light"
+
+
+def test_main_window_recent_books_menu(qapp, tmp_path, monkeypatch):
+    """打开书后：最近打开菜单出现该书，可一键重开。"""
+    from PySide6.QtWidgets import QFileDialog
+    book = tmp_path / "novel.txt"
+    book.write_text("第一章 风起\n内容甲。", encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(book), "txt")))
+    win = MainWindow()
+    win.open_file()
+    acts = [a for a in win._recent_menu.actions() if a.text()]
+    assert len(acts) == 1
+    assert acts[0].text() == "novel.txt"
+
+
+def test_main_window_window_state_saved(qapp, tmp_path, monkeypatch):
+    """保存窗口状态 → settings 可读取（hex 编码）。"""
+    import core.settings_store as settings_store
+    win = MainWindow()
+    win._save_window_state()
+    data = settings_store.load_settings()
+    assert data.get("window_geometry") is not None
+    # 恢复不抛错
+    win._restore_window_state(data)
+
+
+def test_main_window_chapter_nav_from_reader(qapp):
+    """章末『下一章』链接 → 切到下一章。"""
+    win = MainWindow()
+    win._chapters = [{"title": "一", "content": "甲。"},
+                     {"title": "二", "content": "乙。"}]
+    win._show_chapter(0)
+    win._reader.next_requested.emit()
+    assert win._current_chapter == 1
+    win._reader.prev_requested.emit()
+    assert win._current_chapter == 0
+
+
 def test_main_window_search_wires_to_reader(qapp):
     """输入搜索词 → 阅读器高亮 → 计数显示。"""
     win = MainWindow()
@@ -495,18 +597,31 @@ def test_main_window_search_persists_across_chapters(qapp):
 
 
 def test_main_window_sentence_highlight_wires(qapp):
-    """引擎句子开始信号 → 正文跟读高亮。"""
+    """引擎句子开始信号 → 正文按偏移跟读高亮 + 句级进度。"""
     win = MainWindow()
     win._chapters = [{"title": "第一章", "content": "风起云涌。风起云涌。"}]
     win._show_chapter(0)
     win._engine._current_sentences = ["风起云涌。", "风起云涌。"]
+    win._engine._current_ranges = [(0, 5), (5, 10)]
     win._engine.sentence_started.emit(0)
     assert win._reader._sentence_sel is not None
     first_start = win._reader._sentence_sel.cursor.selectionStart()
-    # 下一句：锚点推进，定位到第二处
+    assert win._player_bar._sentence_progress.text() == "1/2 句"
+    # 下一句：偏移推进，定位到第二处
     win._engine.sentence_started.emit(1)
     second_start = win._reader._sentence_sel.cursor.selectionStart()
     assert second_start > first_start
+    assert win._player_bar._sentence_progress.text() == "2/2 句"
+
+
+def test_main_window_sentence_progress_cleared_on_stop(qapp):
+    """停止后句级进度清零。"""
+    win = MainWindow()
+    win._chapters = [{"title": "第一章", "content": "甲。"}]
+    win._show_chapter(0)
+    win._player_bar.set_sentence_progress(1, 5)
+    win._on_stop()
+    assert win._player_bar._sentence_progress.text() == ""
 
 
 def test_main_window_sentence_highlight_skips_on_mismatch(qapp):

@@ -115,6 +115,11 @@ class PlayerBar(QWidget):
         self._stop_btn.clicked.connect(self.stop_requested)
         layout.addWidget(self._stop_btn)
 
+        self._sentence_progress = QLabel("")
+        self._sentence_progress.setObjectName("sentenceProgress")
+        self._sentence_progress.setToolTip("播放进度（句）")
+        layout.addWidget(self._sentence_progress)
+
         self._status = QLabel("未打开书籍")
         self._status.setObjectName("statusLabel")
         layout.addWidget(self._status, 1)
@@ -183,6 +188,13 @@ class PlayerBar(QWidget):
 
     def set_status(self, text: str) -> None:
         self._status.setText(text)
+
+    def set_sentence_progress(self, current: int, total: int) -> None:
+        """显示播放进度：如 3/45 句；total<=0 时清空。"""
+        if total > 0 and current > 0:
+            self._sentence_progress.setText(f"{current}/{total} 句")
+        else:
+            self._sentence_progress.setText("")
 
     def set_playing(self, playing: bool) -> None:
         self._play_btn.setText("⏸" if playing else "▶")

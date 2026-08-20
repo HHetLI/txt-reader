@@ -6,7 +6,7 @@ import edge_tts
 from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
-from core.sentence_splitter import split_sentences
+from core.sentence_splitter import split_sentences_with_offsets
 from core.tts_backend import (EdgeTTSBackend, IndexTTSBackend, TTSBackendError,
                               sentence_limit_for_backend)
 
@@ -200,6 +200,7 @@ class TtsEngine(QObject):
         self._out_dir: Path | None = None
         # 当前章节切分结果：供 UI 跟读高亮定位（sentence_started 的索引直接索引）
         self._current_sentences: list[str] = []
+        self._current_ranges: list[tuple[int, int]] = []  # (start, end) 字符偏移
 
         self._voice = "zh-CN-XiaoxiaoNeural"
         self._rate = "+0%"
@@ -366,15 +367,19 @@ class TtsEngine(QObject):
     def current_chapter_index(self) -> int:
         return self._chapter_index
 
-    def sentence_text(self, index: int) -> str | None:
-        """当前章节第 index 句的文本（UI 跟读高亮定位用）。
+    def sentence_range(self, index: int) -> tuple[int, int] | None:
+        """当前章节第 index 句在正文中的 [start, end) 字符偏移（UI 跟读高亮定位用）。
 
         sentence_started 的索引是相对当前章节的绝对句索引，直接索引
-        _current_sentences 即可；越界或未切句时返回 None。
+        _current_ranges 即可；越界或未切句时返回 None。
         """
-        if 0 <= index < len(self._current_sentences):
-            return self._current_sentences[index]
+        if 0 <= index < len(self._current_ranges):
+            return self._current_ranges[index]
         return None
+
+    def sentence_count(self) -> int:
+        """当前章节总句数（播放进度显示用）。"""
+        return len(self._current_sentences)
 
     # ---- Task 3：后端切换 + 情感 ----
 
@@ -446,8 +451,10 @@ class TtsEngine(QObject):
                 self._backend = _backend_factory("edge")
         chapter = self._chapters[index]
         limit = sentence_limit_for_backend(self._backend_name)
-        sentences = split_sentences(chapter["content"], max_len=limit)
+        pairs = split_sentences_with_offsets(chapter["content"], max_len=limit)
+        sentences = [s for s, _ in pairs]
         self._current_sentences = sentences
+        self._current_ranges = [(start, start + len(s)) for s, start in pairs]
         if start_sentence >= len(sentences):
             start_sentence = max(0, len(sentences) - 1)
         remainder = sentences[start_sentence:]

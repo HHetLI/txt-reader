@@ -11,12 +11,24 @@ from core.tts_engine import TtsEngine, _SynthesisWorker
 
 @pytest.fixture
 def fake_synth(monkeypatch):
-    """用写假 mp3 的合成函数替换真实 edge-tts，保证离线可测。"""
+    """用写假 mp3 的合成函数替换真实 edge-tts，保证离线可测。
+
+    同时强制引擎走 edge 后端（_backend_factory 返回 name="edge" 的 fake）：
+    模型是否安装都不影响——否则模型安装后 is_available()=True，引擎走
+    IndexTTS 分支，测试依赖模型缺失（曾导致 4 个测试在模型安装后失败）。
+    """
 
     async def fake_synthesize(sentence, voice, rate, out_path):
         Path(out_path).write_bytes(b"fake-mp3")
 
     monkeypatch.setattr("core.tts_engine.synthesize_sentence", fake_synthesize)
+
+    class _FakeEdgeBackend:
+        name = "edge"
+
+    monkeypatch.setattr(
+        "core.tts_engine._backend_factory",
+        lambda name: _FakeEdgeBackend())
 
 
 def test_worker_synthesizes_in_order(qtbot, fake_synth):
@@ -89,6 +101,11 @@ def test_engine_drains_after_synthesis_error(qtbot, monkeypatch):
         raise RuntimeError("网络不可用")
 
     monkeypatch.setattr("core.tts_engine.synthesize_sentence", failing_synthesize)
+    # 强制 edge 后端：模型是否安装都不影响（见 fake_synth 说明）
+    class _FakeEdgeBackend:
+        name = "edge"
+    monkeypatch.setattr("core.tts_engine._backend_factory",
+                        lambda name: _FakeEdgeBackend())
 
     engine = TtsEngine()
     chapters = [
@@ -223,6 +240,11 @@ def test_engine_skips_missing_index_on_media_end(qtbot, monkeypatch):
         Path(out_path).write_bytes(b"fake-mp3")
 
     monkeypatch.setattr("core.tts_engine.synthesize_sentence", skipping_synthesize)
+    # 强制 edge 后端：模型是否安装都不影响（见 fake_synth 说明）
+    class _FakeEdgeBackend:
+        name = "edge"
+    monkeypatch.setattr("core.tts_engine._backend_factory",
+                        lambda name: _FakeEdgeBackend())
 
     engine = TtsEngine()
     chapters = [{"title": "第一章", "content": "甲。乙。丙。"}]

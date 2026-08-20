@@ -24,6 +24,35 @@ class TTSBackendError(Exception):
     """TTS 合成失败（网络/模型/显存等）。"""
 
 
+#: indextts 源码仓库的常见克隆位置（用于把仓库根加入 sys.path 以 `import indextts`）
+_INDEXTTS_REPO_CANDIDATES = (
+    r"E:\WorkSpace\index-tts",
+    r"C:\WorkSpace\index-tts",
+    r"D:\index-tts",
+    r"E:\index-tts",
+)
+
+
+def _ensure_indextts_importable() -> None:
+    """确保 `import indextts` 可用：若当前解释器无法导入，则把仓库根加入 sys.path。
+
+    indextts 是源码包（index-tts 仓库根目录下的 indextts/），通常未 pip 安装，
+    依赖仓库根在 sys.path。探测常见 clone 位置，命中则插入 sys.path 首位。
+    若探测失败但环境中已可导入（如已安装），静默通过。
+    """
+    import sys
+    try:
+        import indextts  # noqa: F401
+        return
+    except ImportError:
+        pass
+    for candidate in _INDEXTTS_REPO_CANDIDATES:
+        if Path(candidate, "indextts", "__init__.py").is_file():
+            if candidate not in sys.path:
+                sys.path.insert(0, candidate)
+            return
+
+
 def emo_mode_to_vector(mode: str, strength: float) -> list[float] | None:
     """情感模式 + 强度 → 8 维向量。自动模式返回 None（走 use_emo_text）。"""
     if mode == EMO_MODE_AUTO:
@@ -91,7 +120,7 @@ class IndexTTSBackend:
 
     def __init__(self, model_dir: Path | None = None,
                  spk_audio_prompt: Path | str | None = None):
-        self._model_dir = model_dir or Path("models/indextts")
+        self._model_dir = Path(model_dir) if model_dir else Path("models/indextts")
         # 参考音频路径可配置：显式参数 > INDEXTTS_REF_AUDIO > 常见位置（见
         # resolve_spk_audio_prompt）。不硬编码仓库外路径，缺失时 synthesize 报明确错误。
         self._spk_audio_prompt = resolve_spk_audio_prompt(
@@ -131,6 +160,9 @@ class IndexTTSBackend:
             if self._load_cancelled:
                 raise TTSBackendError("IndexTTS 模型加载已取消")
             try:
+                # indextts 是源码包（未 pip 安装）：把常见 clone 位置加入 sys.path，
+                # 使 `import indextts` 可用（应用与 index-tts 仓库分离部署）
+                _ensure_indextts_importable()
                 from indextts.infer_v2_5 import IndexTTS2
                 # 检查点：import（含 torch 等重依赖）结束后仍被取消则放弃
                 if self._load_cancelled:

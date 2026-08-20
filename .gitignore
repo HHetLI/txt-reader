@@ -33,3 +33,6 @@ IndexTTS-2.5/
 
 # 测试用 txt 素材
 *.txt
+
+# 内部开发计划/规格文档（不随仓库发布）
+docs/superpowers/

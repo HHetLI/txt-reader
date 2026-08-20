@@ -132,6 +132,7 @@ class PlayerBar(QWidget):
     def _on_backend_changed(self) -> None:
         name = self.backend()
         self._apply_backend_visibility(name)
+        self._repopulate_voice_combo(name)
         self.backend_changed.emit(name)
 
     def _apply_backend_visibility(self, name: str) -> None:
@@ -140,6 +141,25 @@ class PlayerBar(QWidget):
         for widget in (self._emotion, self._strength):
             widget.setVisible(active)
             widget.setEnabled(active)
+
+    def _repopulate_voice_combo(self, name: str) -> None:
+        """声线下拉自适应：edge 显示微软 5 声线；IndexTTS 显示同名参考音色。
+
+        两种模式条目同名（晓晓/云希/...）且 data 均为声线码，切换引擎时
+        保持选中项不变——引擎 set_voice 负责按后端把声线码映射到
+        edge voice 或 IndexTTS 参考音频。
+        """
+        current = self._voice.currentData()
+        self._voice.blockSignals(True)
+        self._voice.clear()
+        for code, label in VOICES:
+            self._voice.addItem(label, code)
+        if current is not None:
+            idx = self._voice.findData(current)
+            self._voice.setCurrentIndex(idx if idx >= 0 else 0)
+        self._voice.blockSignals(False)
+        # 通知引擎当前声线（引擎会按后端映射，IndexTTS 切参考音频）
+        self.voice_changed.emit(self.voice())
 
     def _on_emotion_changed(self) -> None:
         self.emotion_changed.emit(self.emotion_mode(), self.emotion_strength())

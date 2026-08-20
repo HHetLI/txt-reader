@@ -388,3 +388,18 @@ def test_reader_view_dark_style(qapp):
     assert "#d5dae3" in css  # 浅色正文
     assert "#7fa3ff" in css  # 标题强调色
     assert view.viewportMargins().left() == 30  # 紧凑边距
+
+
+def test_player_bar_voice_combo_repopulates_on_backend_switch(qapp):
+    """引擎切换时声线下拉重填，保持选中声线一致。"""
+    from ui.player_bar import PlayerBar
+    bar = PlayerBar()
+    # 默认 IndexTTS：声线为参考音色（data 为声线码）
+    bar._voice.setCurrentIndex(2)  # 云健
+    assert bar.voice() == "zh-CN-YunjianNeural"
+    # 切到 edge：条目重填，选中保持不变
+    bar._engine_combo.setCurrentIndex(bar._engine_combo.findData("edge"))
+    assert bar.voice() == "zh-CN-YunjianNeural"
+    # 切回 indextts：仍保持
+    bar._engine_combo.setCurrentIndex(bar._engine_combo.findData("indextts"))
+    assert bar.voice() == "zh-CN-YunjianNeural"

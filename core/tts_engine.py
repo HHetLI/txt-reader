@@ -17,6 +17,29 @@ async def synthesize_sentence(sentence: str, voice: str, rate: str, out_path: Pa
     await communicate.save(str(out_path))
 
 
+#: edge-tts 声线代码 → IndexTTS 参考音频文件名（在 models/indextts/ref_audio/ 下）
+_VOICE_TO_REF_AUDIO = {
+    "zh-CN-XiaoxiaoNeural": "xiaoxiao.wav",
+    "zh-CN-YunxiNeural": "yunxi.wav",
+    "zh-CN-YunjianNeural": "yunjian.wav",
+    "zh-CN-XiaoyiNeural": "xiaoyi.wav",
+    "zh-CN-YunyangNeural": "yunyang.wav",
+}
+
+
+def _resolve_ref_audio_for_voice(voice: str) -> Path | None:
+    """edge 声线代码 → IndexTTS 参考音频路径；无对应素材返回 None。"""
+    fname = _VOICE_TO_REF_AUDIO.get(voice)
+    if fname is None:
+        return None
+    p = Path("models/indextts/ref_audio") / fname
+    if p.is_file():
+        return p
+    # 备选：index-tts 克隆仓库旁的素材（部署环境可能不同）
+    alt = Path(r"E:/WorkSpace/index-tts/examples/ref_audio") / fname
+    return alt if alt.is_file() else None
+
+
 def _backend_factory(name: str):
     """按名称创建后端实例。模块级函数便于测试 monkeypatch。"""
     if name == "edge":
@@ -316,7 +339,15 @@ class TtsEngine(QObject):
             self._start_chapter(self._chapter_index - 1)
 
     def set_voice(self, voice: str) -> None:
+        """切换声线：edge 后端直接设 voice；IndexTTS 后端映射到参考音频（音色）。"""
         self._voice = voice
+        if self._backend is not None and self._backend.name == "indextts":
+            ref = _resolve_ref_audio_for_voice(voice)
+            if ref is not None:
+                try:
+                    self._backend.set_reference_audio(ref)
+                except Exception:  # noqa: BLE001
+                    pass  # 参考音频缺失时保持默认音色，不阻断
         self._restart_current_sentence()
 
     def set_rate(self, rate: str) -> None:

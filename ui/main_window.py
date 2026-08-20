@@ -192,8 +192,9 @@ class MainWindow(QMainWindow):
         self._player_bar.set_status("已停止")
 
     def _on_voice_changed(self, voice: str) -> None:
-        if self._engine.is_playing():
-            self._engine.set_voice(voice)
+        # 无条件透传：引擎 set_voice 内部按后端映射（edge→voice，
+        # indextts→参考音频音色），无会话时安全返回
+        self._engine.set_voice(voice)
 
     def _on_rate_changed(self, rate: str) -> None:
         if self._engine.is_playing():

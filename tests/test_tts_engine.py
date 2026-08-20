@@ -742,3 +742,47 @@ def test_engine_falls_back_to_edge_on_indextts_synthesis_failure(qtbot, monkeypa
     assert any("CUDA out of memory" in e for e in errors)
     assert any("edge-tts" in e for e in errors)
     engine.stop()
+
+
+def test_set_voice_maps_to_reference_audio_on_indextts(qtbot, monkeypatch):
+    """IndexTTS 模式下 set_voice 应把声线码映射为参考音频并传给后端。
+
+    依赖真实素材目录 models/indextts/ref_audio/（xiaoxiao.wav 等），
+    由素材生成脚本产出；缺失时此测试跳过。
+    """
+    import core.tts_engine as te
+    ref = te._resolve_ref_audio_for_voice("zh-CN-XiaoxiaoNeural")
+    if ref is None:
+        pytest.skip("参考音频素材缺失（models/indextts/ref_audio/）")
+    calls: list[str] = []
+
+    class _FakeIndexBackend:
+        name = "indextts"
+
+        def set_reference_audio(self, path):
+            calls.append(str(path))
+
+    monkeypatch.setattr("core.tts_engine._backend_factory",
+                        lambda name: _FakeIndexBackend())
+    engine = TtsEngine()
+    engine.set_voice("zh-CN-XiaoxiaoNeural")
+    assert len(calls) == 1
+    assert str(ref) in calls[0]
+
+
+def test_set_voice_edge_keeps_voice(qtbot, monkeypatch):
+    """edge 模式 set_voice 只设 voice 不碰参考音频。"""
+    calls: list[str] = []
+
+    class _FakeEdgeBackend:
+        name = "edge"
+
+        def set_reference_audio(self, path):
+            calls.append(str(path))
+
+    monkeypatch.setattr("core.tts_engine._backend_factory",
+                        lambda name: _FakeEdgeBackend())
+    engine = TtsEngine()
+    engine.set_voice("zh-CN-YunxiNeural")
+    assert engine._voice == "zh-CN-YunxiNeural"
+    assert calls == []  # edge 不调用参考音频

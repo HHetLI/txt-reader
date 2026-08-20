@@ -196,6 +196,16 @@ class IndexTTSBackend:
     def unload(self) -> None:
         IndexTTSBackend._tts = None
 
+    def set_reference_audio(self, path: Path | str | None) -> None:
+        """切换参考音频（音色）。接受绝对/相对路径；None 回退默认。"""
+        if path is None:
+            self._spk_audio_prompt = resolve_spk_audio_prompt(None)
+            return
+        p = Path(path)
+        if not p.is_file():
+            raise TTSBackendError(f"参考音频不存在: {p}")
+        self._spk_audio_prompt = p
+
     async def synthesize(self, text: str, emo_mode: str, emo_strength: float,
                          out_path: Path) -> None:
         prompt = self._spk_audio_prompt

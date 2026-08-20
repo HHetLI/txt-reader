@@ -4,7 +4,7 @@ from pathlib import Path
 
 import edge_tts
 from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Signal
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 
 from core.sentence_splitter import split_sentences_with_offsets
 from core.tts_backend import (EdgeTTSBackend, IndexTTSBackend, TTSBackendError,
@@ -366,6 +366,45 @@ class TtsEngine(QObject):
 
     def current_chapter_index(self) -> int:
         return self._chapter_index
+
+    @staticmethod
+    def cleanup_stale_temp(max_age_seconds: int = 3600) -> int:
+        """清理残留的 t2voice_* 合成临时目录（超过 max_age 的），返回清理数。
+
+        杀进程/崩溃关闭应用不会触发 _cleanup_temp，导致临时目录堆积；
+        启动时清理旧目录避免垃圾膨胀。只删除超过阈值的目录，不会误删
+        其他正在运行实例的合成目录。
+        """
+        import shutil
+        import time
+
+        root = Path(tempfile.gettempdir())
+        now = time.time()
+        removed = 0
+        for d in root.glob("t2voice_*"):
+            try:
+                if now - d.stat().st_mtime > max_age_seconds:
+                    shutil.rmtree(d, ignore_errors=True)
+                    removed += 1
+            except OSError:
+                pass
+        return removed
+
+    def set_audio_device(self, description: str | None) -> None:
+        """切换音频输出设备（description=None 用系统默认）。
+
+        系统默认设备可能是未连接的蓝牙耳机等，声音会被路由走而听不到，
+        故暴露设备选择让用户指定实际扬声器。
+        """
+        if description is None:
+            default = QMediaDevices.defaultAudioOutput()
+            if default is not None and default.isNull() is False:
+                self._audio.setDevice(default)
+            return
+        for dev in QMediaDevices.audioOutputs():
+            if dev.description() == description:
+                self._audio.setDevice(dev)
+                return
 
     def sentence_range(self, index: int) -> tuple[int, int] | None:
         """当前章节第 index 句在正文中的 [start, end) 字符偏移（UI 跟读高亮定位用）。

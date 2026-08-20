@@ -26,3 +26,14 @@ def _isolate_stores(monkeypatch, tmp_path):
                         lambda: tmp_path / "progress.json")
     monkeypatch.setattr(settings_store, "_settings_path",
                         lambda: tmp_path / "settings.json")
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """测试结束后清理残留的 t2voice_test_* 合成临时目录。"""
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tempfile.gettempdir())
+    for d in root.glob("t2voice_test_*"):
+        shutil.rmtree(d, ignore_errors=True)

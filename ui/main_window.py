@@ -2,6 +2,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import (QCloseEvent, QIcon, QKeySequence, QShortcut)
+from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QComboBox,
                                QDialog, QFileDialog, QLineEdit, QMainWindow,
                                QMenu, QMessageBox, QSystemTrayIcon, QVBoxLayout,
@@ -25,6 +26,8 @@ _ICON_PATH = Path(__file__).resolve().parent.parent / "resources" / "icon.png"
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # 清理上次异常退出残留的合成临时目录（杀进程不触发 _cleanup_temp）
+        TtsEngine.cleanup_stale_temp()
         self.setWindowTitle("小说阅读听书")
         self.resize(1000, 700)
 
@@ -34,6 +37,7 @@ class MainWindow(QMainWindow):
 
         settings = load_settings()
         self._theme = settings.get("theme", "deep")
+        self._audio_device = settings.get("audio_device")  # None=系统默认
 
         self._engine = TtsEngine(self)
         self._chapters: list[dict] = []
@@ -60,6 +64,7 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
         self._connect_signals()
         self._apply_theme(self._theme, persist=False)
+        self._apply_audio_device(self._audio_device, persist=False)
         self._restore_window_state(settings)
         self._setup_tray()
         self._refresh_recent_menu()
@@ -113,6 +118,29 @@ class MainWindow(QMainWindow):
             act.triggered.connect(
                 lambda checked=False, n=name: self._apply_theme(n))
             self._theme_actions.append(act)
+        settings_menu.addSeparator()
+        self._audio_menu = settings_menu.addMenu("音频输出")
+        self._audio_actions: list = []
+        # 系统默认：跟随 Windows 当前默认播放设备
+        act = self._audio_menu.addAction("系统默认")
+        act.setCheckable(True)
+        act.setData(None)
+        act.triggered.connect(
+            lambda checked=False: self._apply_audio_device(None))
+        self._audio_actions.append(act)
+        try:
+            devices = QMediaDevices.audioOutputs()
+        except Exception:  # noqa: BLE001
+            devices = []
+        for dev in devices:
+            desc = dev.description()
+            act = self._audio_menu.addAction(desc)
+            act.setCheckable(True)
+            act.setData(desc)
+            act.setToolTip("切换播放声音到该设备")
+            act.triggered.connect(
+                lambda checked=False, d=desc: self._apply_audio_device(d))
+            self._audio_actions.append(act)
         settings_menu.addSeparator()
         settings_menu.addAction("字号 +\tCtrl+=").triggered.connect(
             lambda: self._zoom_font(1))
@@ -199,6 +227,20 @@ class MainWindow(QMainWindow):
             act.setChecked(act.data() == name)
         if persist:
             save_settings(theme=name)
+
+    def _apply_audio_device(self, description: str | None,
+                            persist: bool = True) -> None:
+        """切换音频输出设备（None=系统默认）；持久化并更新菜单勾选。
+
+        系统默认设备可能是未连接的蓝牙耳机等，声音会被路由走而听不到，
+        因此提供设备选择让用户指定实际扬声器。
+        """
+        self._audio_device = description
+        self._engine.set_audio_device(description)
+        for act in self._audio_actions:
+            act.setChecked(act.data() == description)
+        if persist:
+            save_settings(audio_device=description)
 
     def _restore_window_state(self, settings: dict) -> None:
         """恢复上次窗口大小/位置（settings 存储 hex 几何）。"""

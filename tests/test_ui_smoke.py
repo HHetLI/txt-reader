@@ -43,36 +43,220 @@ def test_reader_view_line_spacing_sets_block_height(qapp):
     assert fmt.lineHeightType() == QTextBlockFormat.ProportionalHeight.value
 
 
-from ui.chapter_panel import ChapterPanel
+# ---------- 正文搜索（Ctrl+F） ----------
 
 
-def test_chapter_panel_set_and_select(qapp):
-    panel = ChapterPanel()
-    panel.set_chapters(["第一章", "第二章", "第三章"])
-    panel.select_chapter(1)
-    assert panel.current_index() == 1
+def test_reader_view_search_highlights_all(qapp):
+    """搜索词高亮全部匹配，当前匹配索引指向第一个。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "甲乙丙甲丁甲")
+    count = view.search("甲")
+    assert count == 3
+    assert view.match_count() == 3
+    assert view.current_match() == 0
+    assert len(view.extraSelections()) == 3
 
 
-def test_chapter_panel_signal(qapp):
+def test_reader_view_search_empty_text(qapp):
+    """空搜索词：不清除旧高亮以外的状态，匹配数为 0。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "甲乙")
+    assert view.search("") == 0
+    assert view.extraSelections() == []
+
+
+def test_reader_view_find_next_cycles(qapp):
+    """下一个/上一个循环跳转，当前匹配索引跟随。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "甲乙丙甲乙")
+    view.search("甲")
+    assert view.current_match() == 0
+    assert view.find_next(False) is True
+    assert view.current_match() == 1
+    assert view.find_next(False) is True  # 循环回第一个
+    assert view.current_match() == 0
+    assert view.find_next(True) is True   # 上一个 → 最后一个
+    assert view.current_match() == 1
+
+
+def test_reader_view_find_next_no_match(qapp):
+    """无匹配时 find_next 返回 False，计数为空。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "甲乙丙")
+    view.search("不存在")
+    assert view.match_count() == 0
+    assert view.find_next() is False
+
+
+def test_reader_view_clear_search(qapp):
+    """清除搜索：匹配清空、高亮移除。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "甲乙甲")
+    view.search("甲")
+    view.clear_search()
+    assert view.match_count() == 0
+    assert view.extraSelections() == []
+
+
+def test_reader_view_search_reset_on_show_chapter(qapp):
+    """换章后旧搜索高亮失效（正文已变更）。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "甲乙甲")
+    view.search("甲")
+    assert view.match_count() == 2
+    view.show_chapter("第二章", "丙丁")
+    assert view.match_count() == 0
+    assert view.extraSelections() == []
+
+
+from ui.search_bar import SearchBar
+
+
+def test_search_bar_result_text(qapp):
+    bar = SearchBar()
+    bar.set_result(0, 5)
+    assert bar._count.text() == "1/5"
+    bar.set_result(4, 5)
+    assert bar._count.text() == "5/5"
+    bar.set_result(-1, 0)
+    assert bar._count.text() == "无匹配"
+
+
+def test_search_bar_text_change_signal(qapp):
     from PySide6.QtTest import QSignalSpy
-    panel = ChapterPanel()
-    spy = QSignalSpy(panel.chapter_selected)
-    panel.set_chapters(["a", "b"])
-    panel._list.setCurrentRow(1)
+    bar = SearchBar()
+    spy = QSignalSpy(bar.search_text)
+    bar._input.setText("风起")
     assert spy.count() == 1
-    assert spy.at(0)[0] == 1
+    assert spy.at(0)[0] == "风起"
+    bar._input.setText("")
+    assert spy.count() == 2
+    assert spy.at(1)[0] == ""
 
 
-def test_chapter_panel_select_chapter_silent(qapp):
+def test_search_bar_enter_signal(qapp):
     from PySide6.QtTest import QSignalSpy
-    panel = ChapterPanel()
-    spy = QSignalSpy(panel.chapter_selected)
-    panel.set_chapters(["a", "b", "c"])
-    panel.select_chapter(1)
-    assert spy.count() == 0
-    panel._list.setCurrentRow(2)
+    bar = SearchBar()
+    next_spy = QSignalSpy(bar.find_next_requested)
+    bar._input.setText("风")
+    bar._input.returnPressed.emit()
+    assert next_spy.count() == 1
+
+
+def test_search_bar_close_signal(qapp):
+    from PySide6.QtTest import QSignalSpy
+    bar = SearchBar()
+    spy = QSignalSpy(bar.closed)
+    bar._close_btn.click()
     assert spy.count() == 1
-    assert spy.at(0)[0] == 2
+
+
+# ---------- 播放句子跟读高亮 ----------
+
+
+def test_reader_view_highlight_sentence(qapp):
+    view = ReaderView()
+    view.show_chapter("第一章", "风起云涌。风起云涌。")
+    assert view.highlight_sentence("风起云涌。") is True
+    assert view._sentence_sel is not None
+    assert view._sentence_anchor >= 0
+
+
+def test_reader_view_highlight_sentence_cross_line(qapp):
+    """跨行句子：\n 在渲染文档中是 U+2028，归一化后必须能匹配。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "第一行开头\n第二行结尾。")
+    assert view.highlight_sentence("第一行开头\n第二行结尾。") is True
+    assert view._sentence_sel is not None
+
+
+def test_reader_view_highlight_anchor_advances(qapp):
+    """重复句子：从上次位置向后找，第二句定位到第二处而非开头。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "风起。风起。")
+    assert view.highlight_sentence("风起。") is True
+    first_start = view._sentence_sel.cursor.selectionStart()
+    assert view.highlight_sentence("风起。") is True
+    second_start = view._sentence_sel.cursor.selectionStart()
+    assert second_start > first_start
+
+
+def test_reader_view_highlight_no_match(qapp):
+    view = ReaderView()
+    view.show_chapter("第一章", "甲乙丙")
+    assert view.highlight_sentence("不存在的句子") is False
+    assert view._sentence_sel is None
+
+
+def test_reader_view_sentence_and_search_coexist(qapp):
+    """跟读高亮与搜索高亮并存互不覆盖。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "风起云涌。风起云涌。")
+    view.highlight_sentence("风起云涌。")
+    view.search("风起")  # 2 个搜索匹配
+    # 搜索 2 个 + 句子 1 个 = 3 个 extra selections
+    assert len(view.extraSelections()) == 3
+    # 清搜索：句子高亮保留
+    view.clear_search()
+    assert view._sentence_sel is not None
+    assert len(view.extraSelections()) == 1
+    # 清句子高亮：全部清空
+    view.clear_sentence_highlight()
+    assert view.extraSelections() == []
+
+
+def test_reader_view_sentence_cleared_on_show_chapter(qapp):
+    """换章后跟读高亮失效（正文已变更）。"""
+    view = ReaderView()
+    view.show_chapter("第一章", "甲乙甲")
+    view.highlight_sentence("甲乙甲")
+    assert view._sentence_sel is not None
+    view.show_chapter("第二章", "丙丁")
+    assert view._sentence_sel is None
+    assert view.extraSelections() == []
+
+
+from ui.chapter_dialog import ChapterDialog
+
+
+def test_chapter_dialog_populates_and_preselects(qapp):
+    """对话框填充全部章节，且预选当前章节。"""
+    dialog = ChapterDialog(["第一章", "第二章", "第三章"], current=1)
+    assert dialog._list.count() == 3
+    assert dialog._list.currentRow() == 1
+
+
+def test_chapter_dialog_clamps_current(qapp):
+    """越界的 current 索引被夹取到合法范围。"""
+    dialog = ChapterDialog(["第一章", "第二章"], current=99)
+    assert dialog._list.currentRow() == 1
+
+
+def test_chapter_dialog_filter(qapp):
+    """搜索过滤：只保留标题匹配的章节行。"""
+    dialog = ChapterDialog(["第一章 风起", "第二章 云涌", "第三章 雷动"])
+    dialog._search.setText("云涌")
+    visible = [i for i in range(dialog._list.count())
+               if not dialog._list.item(i).isHidden()]
+    assert visible == [1]
+
+
+def test_chapter_dialog_accept_current(qapp):
+    """确认当前行：selected_index 记录所选章节并 accept。"""
+    from PySide6.QtWidgets import QDialog
+    dialog = ChapterDialog(["a", "b", "c"], current=2)
+    dialog._accept_current()
+    assert dialog.selected_index == 2
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_chapter_dialog_accept_item(qapp):
+    """双击条目：按点击行返回所选章节。"""
+    from PySide6.QtWidgets import QDialog
+    dialog = ChapterDialog(["a", "b", "c"])
+    dialog._accept_item(dialog._list.item(1))
+    assert dialog.selected_index == 1
+    assert dialog.result() == QDialog.DialogCode.Accepted
 
 
 from ui.player_bar import PlayerBar
@@ -195,8 +379,117 @@ def test_main_window_constructs(qapp):
     win = MainWindow()
     assert win.windowTitle() == "小说阅读听书"
     assert win._reader is not None
-    assert win._chapter_panel is not None
     assert win._player_bar is not None
+    assert win._current_chapter == -1
+    # 单栏布局：正文阅读器直接是中央区域的子控件（不再有章节分栏）
+    assert win._reader.parent() is win.centralWidget()
+
+
+def test_main_window_search_open_close(qapp):
+    """Ctrl+F 打开搜索工具条，Esc 关闭并清除高亮。"""
+    win = MainWindow()
+    assert win._search_bar.isHidden()
+    win._open_search()
+    assert not win._search_bar.isHidden()
+    win._close_search()
+    assert win._search_bar.isHidden()
+
+
+def test_main_window_search_wires_to_reader(qapp):
+    """输入搜索词 → 阅读器高亮 → 计数显示。"""
+    win = MainWindow()
+    win._chapters = [{"title": "第一章", "content": "风起云涌。风起云涌。"}]
+    win._show_chapter(0)
+    win._on_search_text("风起")
+    assert win._reader.match_count() == 2
+    assert win._reader.current_match() == 0
+    assert win._search_bar._count.text() == "1/2"
+    # 下一个 → 计数 2/2
+    win._on_find_next()
+    assert win._search_bar._count.text() == "2/2"
+    # 上一个 → 回到 1/2
+    win._on_find_prev()
+    assert win._search_bar._count.text() == "1/2"
+    # 清空搜索词 → 高亮与计数清除
+    win._on_search_text("")
+    assert win._reader.match_count() == 0
+    assert win._search_bar._count.text() == "无匹配"
+
+
+def test_main_window_search_persists_across_chapters(qapp):
+    """换章后搜索词保留并重算（输入框有词时在新章重新高亮）。"""
+    win = MainWindow()
+    win._chapters = [
+        {"title": "第一章", "content": "风起甲"},
+        {"title": "第二章", "content": "风落乙"},
+    ]
+    win._show_chapter(0)
+    win._search_bar._input.setText("风")  # 模拟用户输入 → textChanged 信号链
+    assert win._reader.match_count() == 1
+    # 换章：输入框仍保留搜索词 → 新章重算高亮
+    win._show_chapter(1)
+    assert win._reader.match_count() == 1
+    assert win._reader.current_match() == 0
+
+
+def test_main_window_sentence_highlight_wires(qapp):
+    """引擎句子开始信号 → 正文跟读高亮。"""
+    win = MainWindow()
+    win._chapters = [{"title": "第一章", "content": "风起云涌。风起云涌。"}]
+    win._show_chapter(0)
+    win._engine._current_sentences = ["风起云涌。", "风起云涌。"]
+    win._engine.sentence_started.emit(0)
+    assert win._reader._sentence_sel is not None
+    first_start = win._reader._sentence_sel.cursor.selectionStart()
+    # 下一句：锚点推进，定位到第二处
+    win._engine.sentence_started.emit(1)
+    second_start = win._reader._sentence_sel.cursor.selectionStart()
+    assert second_start > first_start
+
+
+def test_main_window_sentence_highlight_skips_on_mismatch(qapp):
+    """视图与听书章节不一致时（用户跳章），不误高亮当前视图。"""
+    win = MainWindow()
+    win._chapters = [
+        {"title": "第一章", "content": "甲。"},
+        {"title": "第二章", "content": "乙。"},
+    ]
+    win._show_chapter(0)
+    win._engine._current_sentences = ["乙。"]
+    win._engine._chapter_index = 1  # 引擎在播第二章，视图停在第一章
+    win._engine.sentence_started.emit(0)
+    assert win._reader._sentence_sel is None
+
+
+def test_main_window_has_chapter_menu(qapp):
+    """菜单栏包含『章节』菜单（章节选择收敛到菜单栏）。"""
+    win = MainWindow()
+    titles = [a.text() for a in win.menuBar().actions() if a.text()]
+    assert "章节" in titles
+
+
+def test_main_window_chapter_menu_jump(qapp, tmp_path, monkeypatch):
+    """菜单『跳转到章节』→ 对话框选定章节 → 阅读器切换。"""
+    from PySide6.QtWidgets import QFileDialog
+
+    book = tmp_path / "novel.txt"
+    book.write_text("第一章 风起\n内容甲。\n第二章 云涌\n内容乙。",
+                    encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(book), "txt")))
+    win = MainWindow()
+    win.open_file()
+
+    # 对话框预选当前章节；模拟用户确认跳转到第二章
+    dialog = ChapterDialog([c["title"] for c in win._chapters],
+                           current=win._current_chapter)
+    dialog._list.setCurrentRow(1)
+    dialog._accept_current()
+    assert dialog.selected_index == 1
+    # 主窗口应用对话框选择
+    win._show_chapter(dialog.selected_index)
+    assert win._current_chapter == 1
+    assert "内容乙" in win._reader.toHtml()
 
 
 def test_main_window_open_file_flow(qapp, tmp_path, monkeypatch):
@@ -207,9 +500,8 @@ def test_main_window_open_file_flow(qapp, tmp_path, monkeypatch):
                         staticmethod(lambda *a, **k: (str(book), "txt")))
     win = MainWindow()
     win.open_file()
-    assert win._chapter_panel.current_index() == 0
+    assert win._current_chapter == 0
     assert len(win._chapters) == 2
-    assert win._chapter_panel._list.count() == 2
     assert "内容甲" in win._reader.toHtml()
 
 
@@ -268,7 +560,7 @@ def test_open_file_clamps_out_of_range_progress(qapp, tmp_path, monkeypatch):
                         staticmethod(lambda *a, **k: (str(book), "txt")))
     win = MainWindow()
     win.open_file()  # 不应抛出 IndexError
-    assert win._chapter_panel.current_index() == 1
+    assert win._current_chapter == 1
 
 
 def test_prev_next_uses_engine_index_when_session(qapp, tmp_path, monkeypatch):
@@ -297,15 +589,15 @@ def test_prev_next_uses_engine_index_when_session(qapp, tmp_path, monkeypatch):
     win.open_file()
     win._on_play_toggled()
     assert win._engine.has_session() is True
-    # 模拟：听书在第五章（索引 4），面板被点到第二章（索引 1）→ 视图与音频错位
+    # 模拟：听书在第五章（索引 4），界面被切到第二章（索引 1）→ 视图与音频错位
     win._engine._chapter_index = 4
-    win._chapter_panel.select_chapter(1)
+    win._show_chapter(1)
     win._on_next()
     assert win._engine.current_chapter_index() == 5
-    assert win._chapter_panel.current_index() == 5
+    assert win._current_chapter == 5
     win._on_prev()
     assert win._engine.current_chapter_index() == 4
-    assert win._chapter_panel.current_index() == 4
+    assert win._current_chapter == 4
     win._engine.stop()
 
 
@@ -358,8 +650,7 @@ def test_main_window_play_passes_backend_and_emotion(qapp):
     """首次播放：play_chapters 必须携带引擎/情感控件当前值。"""
     win = MainWindow()
     win._chapters = [{"title": "第一章", "content": "甲。"}]
-    win._chapter_panel.set_chapters(["第一章"])
-    win._chapter_panel.select_chapter(0)
+    win._show_chapter(0)
     calls: list[tuple] = []
 
     def spy_play(chapters, start_index=0, voice=None, rate=None,

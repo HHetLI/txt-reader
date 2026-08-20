@@ -198,6 +198,8 @@ class TtsEngine(QObject):
         self._chapters: list[dict] = []
         self._chapter_index = 0
         self._out_dir: Path | None = None
+        # 当前章节切分结果：供 UI 跟读高亮定位（sentence_started 的索引直接索引）
+        self._current_sentences: list[str] = []
 
         self._voice = "zh-CN-XiaoxiaoNeural"
         self._rate = "+0%"
@@ -364,6 +366,16 @@ class TtsEngine(QObject):
     def current_chapter_index(self) -> int:
         return self._chapter_index
 
+    def sentence_text(self, index: int) -> str | None:
+        """当前章节第 index 句的文本（UI 跟读高亮定位用）。
+
+        sentence_started 的索引是相对当前章节的绝对句索引，直接索引
+        _current_sentences 即可；越界或未切句时返回 None。
+        """
+        if 0 <= index < len(self._current_sentences):
+            return self._current_sentences[index]
+        return None
+
     # ---- Task 3：后端切换 + 情感 ----
 
     def set_backend(self, name: str) -> None:
@@ -435,6 +447,7 @@ class TtsEngine(QObject):
         chapter = self._chapters[index]
         limit = sentence_limit_for_backend(self._backend_name)
         sentences = split_sentences(chapter["content"], max_len=limit)
+        self._current_sentences = sentences
         if start_sentence >= len(sentences):
             start_sentence = max(0, len(sentences) - 1)
         remainder = sentences[start_sentence:]

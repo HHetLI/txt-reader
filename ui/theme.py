@@ -12,6 +12,7 @@ TEXT_MAIN = "#d5dae3"       # 主文字
 TEXT_MUTED = "#8b93a3"      # 次要文字
 BORDER = "#2e3440"          # 边框
 MENU_BG = "#1e2129"         # 菜单栏背景
+SENTENCE_HL = "#8a7a42"     # 播放句子跟读高亮（暗金）
 
 
 def build_qss() -> str:
@@ -57,21 +58,28 @@ QMenu::separator {{
     margin: 4px 8px;
 }}
 
-/* ===== 分割器 ===== */
-QSplitter::handle {{
-    background-color: {BORDER};
-    width: 2px;
+/* ===== 章节选择对话框 ===== */
+QDialog {{
+    background-color: {BG_MAIN};
+    color: {TEXT_MAIN};
 }}
-QSplitter::handle:hover {{
-    background-color: {ACCENT};
+QLineEdit {{
+    background-color: {BG_INPUT};
+    color: {TEXT_MAIN};
+    border: 1px solid {BORDER};
+    border-radius: 5px;
+    padding: 4px 8px;
+    font-size: 12px;
+    selection-background-color: {BG_SELECT};
 }}
-
-/* ===== 章节列表 ===== */
+QLineEdit:focus {{
+    border-color: {ACCENT};
+}}
 QListWidget {{
     background-color: {BG_PANEL};
     color: {TEXT_MAIN};
-    border: none;
-    border-right: 1px solid {BORDER};
+    border: 1px solid {BORDER};
+    border-radius: 5px;
     outline: none;
     font-size: 12px;
 }}
@@ -117,15 +125,18 @@ QPushButton#playBtn {{
 QPushButton#playBtn:hover {{
     background-color: #5f89ff;
 }}
-QPushButton#toggleBtn {{
-    background: transparent;
-    border: none;
-    font-size: 13px;
-    padding: 2px;
+/* ===== 正文搜索工具条 ===== */
+QWidget#searchBar {{
+    background-color: {BG_PANEL};
+    border-bottom: 1px solid {BORDER};
 }}
-QPushButton#toggleBtn:hover {{
-    background-color: {BG_HOVER};
-    border-radius: 4px;
+QLabel#searchCount {{
+    color: {TEXT_MUTED};
+    min-width: 48px;
+}}
+QPushButton#searchNav, QPushButton#searchClose {{
+    padding: 2px;
+    font-size: 12px;
 }}
 
 /* ===== 下拉框 ===== */

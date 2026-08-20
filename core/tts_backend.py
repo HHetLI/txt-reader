@@ -137,8 +137,9 @@ class IndexTTSBackend:
         self._load_cancelled = True
 
     def is_available(self) -> bool:
-        """模型权重与 indextts 包是否就绪。"""
+        """模型权重与 indextts 包是否就绪（含仓库路径探测）。"""
         try:
+            _ensure_indextts_importable()
             import indextts  # noqa: F401
         except ImportError:
             return False
@@ -171,6 +172,11 @@ class IndexTTSBackend:
                     cfg_path=str(self._model_dir / "config.yaml"),
                     model_dir=str(self._model_dir),
                     use_bf16=True,
+                    # 关闭 CUDA kernel 编译 / torch.compile：避免运行时 ninja 依赖，
+                    # 与实测验证的 CLI 配置一致（use_cuda_kernel/use_torch_compile 默认
+                    # True 会触发 C++ 扩展编译，缺 ninja 报错）
+                    use_cuda_kernel=False,
+                    use_torch_compile=False,
                     # 自动情感（use_emo_text）依赖 QwenEmotion 文本→情感向量模型；
                     # 不加载则 synthesize(use_emo_text=True) 抛 RuntimeError。
                     use_qwen_emo=True,

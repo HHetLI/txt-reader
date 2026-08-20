@@ -29,3 +29,7 @@ Thumbs.db
 
 # 本地模型权重（IndexTTS-2.5 等，约 10GB 不入库）
 models/
+IndexTTS-2.5/
+
+# 测试用 txt 素材
+*.txt

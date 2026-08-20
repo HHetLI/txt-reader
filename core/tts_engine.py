@@ -3,11 +3,11 @@ import tempfile
 from pathlib import Path
 
 import edge_tts
-from PySide6.QtCore import QObject, QThread, QUrl, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from core.sentence_splitter import split_sentences
-from core.tts_backend import (EdgeTTSBackend, IndexTTSBackend,
+from core.tts_backend import (EdgeTTSBackend, IndexTTSBackend, TTSBackendError,
                               sentence_limit_for_backend)
 
 
@@ -57,8 +57,8 @@ class _SynthesisWorker(QThread):
 
     def cancel(self) -> None:
         self._cancel = True
-        # 通知后端取消加载：worker 可能正处于懒加载（模型构造 30-60s），
-        # cancel_load 置位后 load() 在检查点快速抛错，退役线程尽快结束，
+        # 通知后端取消加载：worker 可能正处于懒加载（模型构造约 2-4 分钟，
+        # 实测 264s），cancel_load 置位后 load() 在检查点快速抛错，退役线程尽快结束，
         # 缩小 QThread 仍在运行时引擎被 GC 的崩溃窗口
         cancel_load = getattr(self._backend, "cancel_load", None)
         if cancel_load is not None:
@@ -116,6 +116,13 @@ class _SynthesisWorker(QThread):
                     # 重试后仍失败：跳过该句继续，不中断整章
                     failed_count += 1
                     consecutive_failures += 1
+                    # 本地情感引擎（IndexTTS）合成失败（OOM/模型故障）：重试已耗尽，
+                    # 本地故障不随重试恢复，交由引擎切 edge 并重启会话保持播放连续
+                    if (self._backend is not None and self._backend.name != "edge"
+                            and isinstance(last_error, TTSBackendError)):
+                        self.backend_status.emit(f"error:{last_error}")
+                        self.all_done.emit(self._start_index + len(self._sentences))
+                        return
                     if consecutive_failures >= self.FATAL_FAILURE_THRESHOLD:
                         # 连续多句失败说明网络/服务不可用：停止整章，避免每章反复重试
                         self.fatal_error.emit(
@@ -178,6 +185,8 @@ class TtsEngine(QObject):
         self._emotion_strength = 0.6
         self._backend_status = "idle"
         self._backend = _backend_factory(self._backend_name)
+        # 播放中修改情感的防抖重启定时器（0.5s，滑条连续触发时合并为一次）
+        self._emotion_debounce: QTimer | None = None
 
     def __del__(self) -> None:
         """析构保护：确保所有 worker 线程已结束再释放对象。
@@ -187,10 +196,10 @@ class TtsEngine(QObject):
         丢弃引擎的场景（如异常退出），循环等待直到线程结束。
         """
         try:
-            # 加载中的 worker（模型构造 30-60s 为单体调用）无法被 cancel 中途打断，
-            # cancel_load 只在 load() 检查点生效；此处把加载中的等待上限放宽到
-            # 覆盖一次构造时长，避免 15s 内线程未结束时 GC 释放 QThread 崩溃
-            # （0xc0000409，__del__ 守卫针对的就是该场景）。
+            # 加载中的 worker（模型构造约 2-4 分钟，实测 264s，含 QwenEmotion，为单体
+            # 调用）无法被 cancel 中途打断，cancel_load 只在 load() 检查点生效；此处把
+            # 加载中的等待上限放宽到覆盖一次构造时长（≥264s，取 320s 余量），避免
+            # 线程未结束时 GC 释放 QThread 崩溃（0xc0000409，__del__ 守卫针对该场景）。
             deadline = 15.0
             import time as _time
             start = _time.monotonic()
@@ -199,7 +208,7 @@ class TtsEngine(QObject):
                        self._worker is not None
                        and not self._worker.isFinished()
                        and getattr(self._worker, "_loading", False)):
-                deadline = 120.0
+                deadline = 320.0
             while _time.monotonic() - start < deadline:
                 alive = False
                 for w in list(self._retired_workers):
@@ -327,7 +336,7 @@ class TtsEngine(QObject):
     # ---- Task 3：后端切换 + 情感 ----
 
     def set_backend(self, name: str) -> None:
-        """切换后端（edge/indextts）；有会话则重启当前章节。未知名称忽略。"""
+        """切换后端（edge/indextts）；有会话则从当前句重启，不回到章首。未知名称忽略。"""
         if name not in ("edge", "indextts"):
             return
         if name == self._backend_name:
@@ -335,15 +344,35 @@ class TtsEngine(QObject):
         self._backend_name = name
         self._backend = _backend_factory(name)
         if self.has_session():
-            self._start_chapter(self._chapter_index)
+            self._start_chapter(self._chapter_index,
+                                start_sentence=max(0, self._next_index - 1))
 
     def backend(self) -> str:
         return self._backend_name
 
     def set_emotion(self, mode: str, strength: float) -> None:
-        """设置情感参数（IndexTTS 模式生效）；edge 模式也保存，供后续切换使用。"""
+        """设置情感参数（IndexTTS 模式生效）；edge 模式也保存，供后续切换使用。
+
+        播放中且后端为 IndexTTS 时：0.5s 防抖后从当前句重启会话，情感立即生效
+        （滑条连续触发时合并为一次重启）。edge 后端忽略情感，不触发重启。
+        """
         self._emotion_mode = mode
         self._emotion_strength = strength
+        if self._backend_name == "indextts" and self.has_session():
+            self._arm_emotion_restart()
+
+    def _arm_emotion_restart(self) -> None:
+        """防抖重启：取消之前挂起的重启，500ms 后从当前句重启会话。"""
+        if self._emotion_debounce is None:
+            self._emotion_debounce = QTimer(self)
+            self._emotion_debounce.setSingleShot(True)
+            self._emotion_debounce.timeout.connect(self._on_emotion_restart)
+        self._emotion_debounce.start(500)
+
+    def _on_emotion_restart(self) -> None:
+        """防抖到期：仍处于 IndexTTS 会话才重启（stop 后到期的迟到重启须忽略）。"""
+        if self._backend_name == "indextts" and self.has_session():
+            self._restart_current_sentence()
 
     def backend_ready(self) -> bool:
         """IndexTTS 后端已加载（edge 视为始终就绪，供 UI 显示状态）。"""
@@ -450,19 +479,29 @@ class TtsEngine(QObject):
         self.error.emit(message)
 
     def _on_worker_backend_status(self, text: str, generation: int) -> None:
-        """转发 worker 的后端加载状态；懒加载失败时回退 edge 并重启当前会话。"""
+        """转发 worker 的后端加载/合成状态；引擎后端（IndexTTS）失败时回退 edge。
+
+        回退仅在仍有播放会话时执行（保持播放连续）；已停止（无会话）时不改变后端
+        配置——迟到信号不得幽灵切换后端。回退后从当前句重启，不丢失播放进度。
+        """
         if generation != self._generation:
             return
-        self._backend_status = text
-        self.backend_status.emit(text)
         if text.startswith("error:"):
-            # 懒加载失败：仅在仍有播放会话时回退 edge 并重启，保持播放连续；
-            # 已停止（无会话）时不改变后端配置——迟到信号不得幽灵切换后端
+            self.backend_status.emit(text)
             if not self.has_session():
                 return
+            # IndexTTS 懒加载/合成失败（OOM、模型故障等）：切 edge 并重启会话
+            reason = text[len("error:"):]
             self._backend_name = "edge"
             self._backend = _backend_factory("edge")
-            self._start_chapter(self._chapter_index)
+            self._backend_status = f"error:{reason}，已切换至 edge-tts"
+            self.backend_status.emit(self._backend_status)
+            self.error.emit(f"情感引擎合成失败（{reason}），已切换至 edge-tts")
+            self._start_chapter(self._chapter_index,
+                                start_sentence=max(0, self._next_index - 1))
+        else:
+            self._backend_status = text
+            self.backend_status.emit(text)
 
     def _on_media_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:

@@ -171,3 +171,137 @@ async def test_index_backend_missing_spk_audio_prompt_raises(tmp_path):
     with pytest.raises(TTSBackendError) as exc_info:
         await backend.synthesize("你好。", "auto", 0.6, tmp_path / "o.mp3")
     assert "INDEXTTS_REF_AUDIO" in str(exc_info.value)
+
+
+# ---------- Final review：加载取消生命周期 + 合成 kwargs 路由 ----------
+
+
+def test_load_cancel_after_construction_keeps_model(monkeypatch):
+    """取消到达"构造完成后"检查点：不 unload，已构造模型保留供复用。"""
+    IndexTTSBackend._tts = None
+    import threading
+    construct_entered = threading.Event()
+    release_constructor = threading.Event()
+
+    class FakeIndexTTS2:
+        def __init__(self, **kwargs):
+            construct_entered.set()
+            release_constructor.wait(10)  # 模拟构造耗时（真实约 264s）
+            IndexTTSBackend._tts = self   # 模拟构造完成（真实代码构造后赋值）
+
+    import types
+    fake_mod = types.ModuleType("indextts.infer_v2_5")
+    fake_mod.IndexTTS2 = FakeIndexTTS2
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "indextts.infer_v2_5" or name == "indextts":
+            return fake_mod
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(IndexTTSBackend, "is_available", lambda self: True)
+    backend = IndexTTSBackend(model_dir=Path("models/indextts"))
+    errors: list[Exception] = []
+
+    def run():
+        try:
+            backend.load()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert construct_entered.wait(5)  # 已进入构造
+    backend.cancel_load()             # 构造期间收到取消
+    release_constructor.set()
+    t.join(10)
+    # 构造已完成：模型保留（不 unload），本次 load 因"已取消"退出
+    assert backend.is_loaded()
+    assert errors and "已取消" in str(errors[0])
+    # 复用：同一实例再次 load 直接返回（模型已就绪，不再重复构造）
+    backend.load()
+    assert backend.is_loaded()
+    IndexTTSBackend._tts = None
+
+
+def test_load_cancel_before_construction_keeps_nothing(monkeypatch):
+    """取消在构造前（import 期间）到达：模型不构造，加载抛"已取消"。"""
+    IndexTTSBackend._tts = None
+    import threading
+    import_entered = threading.Event()
+    release_import = threading.Event()
+    constructed: list[str] = []
+
+    class FakeIndexTTS2:
+        def __init__(self, **kwargs):
+            constructed.append("constructed")
+
+    import types
+    fake_mod = types.ModuleType("indextts.infer_v2_5")
+    fake_mod.IndexTTS2 = FakeIndexTTS2
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "indextts.infer_v2_5" or name == "indextts":
+            import_entered.set()
+            release_import.wait(10)  # 模拟重依赖 import 耗时
+            return fake_mod
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(IndexTTSBackend, "is_available", lambda self: True)
+    backend = IndexTTSBackend(model_dir=Path("models/indextts"))
+    errors: list[Exception] = []
+
+    def run():
+        try:
+            backend.load()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert import_entered.wait(5)  # import 进行中（构造前）
+    backend.cancel_load()          # 构造前取消
+    release_import.set()
+    t.join(10)
+    assert constructed == []           # 未构造模型
+    assert not backend.is_loaded()
+    assert errors and "已取消" in str(errors[0])
+    IndexTTSBackend._tts = None
+
+
+@pytest.mark.asyncio
+async def test_index_backend_synthesize_routes_emotion_kwargs(monkeypatch, tmp_path):
+    """synthesize 的 kwargs 路由：auto → use_emo_text；手动模式 → emo_vector。
+
+    纯离线：monkeypatch 假 _tts 记录 infer kwargs，不加载真实模型。
+    """
+    IndexTTSBackend._tts = None
+    inferred: list[dict] = []
+
+    class FakeTTS:
+        def infer(self, **kwargs):
+            inferred.append(kwargs)
+
+    ref = tmp_path / "voice_01.wav"
+    ref.write_bytes(b"fake-wav")
+    monkeypatch.setattr(IndexTTSBackend, "is_available", lambda self: True)
+    monkeypatch.setattr(IndexTTSBackend, "_tts", FakeTTS())
+    backend = IndexTTSBackend(model_dir=tmp_path / "models",
+                              spk_audio_prompt=ref)
+    # 自动模式：use_emo_text=True + emo_alpha（强度）
+    await backend.synthesize("你好。", "auto", 0.6, tmp_path / "o1.mp3")
+    assert inferred[-1]["use_emo_text"] is True
+    assert inferred[-1]["emo_alpha"] == 0.6
+    # 手动模式：emo_vector 按强度缩放（悲伤第 3 维 0.8 × strength）
+    await backend.synthesize("你好。", "悲伤", 0.5, tmp_path / "o2.mp3")
+    vec = inferred[-1]["emo_vector"]
+    assert vec[2] == pytest.approx(0.8 * 0.5)
+    assert "use_emo_text" not in inferred[-1]
+    assert inferred[-1]["lang"] == "ZH"
+    assert inferred[-1]["spk_audio_prompt"] == str(ref)
+    IndexTTSBackend._tts = None

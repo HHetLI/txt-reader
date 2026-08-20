@@ -344,7 +344,7 @@ def test_main_window_backend_status_maps_to_status_label(qapp):
     """engine.backend_status → 状态栏文案映射（loading/ready/error:）。"""
     win = MainWindow()
     win._engine.backend_status.emit("loading")
-    assert win._player_bar._status.text() == "正在加载情感引擎（首次约 30-60 秒）…"
+    assert win._player_bar._status.text() == "正在加载情感引擎（首次约 2-4 分钟）…"
     win._engine.backend_status.emit("ready")
     assert win._player_bar._status.text() == "情感引擎就绪"
     win._engine.backend_status.emit("error:IndexTTS2.5 模型加载失败")

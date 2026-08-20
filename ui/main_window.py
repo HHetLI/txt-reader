@@ -213,7 +213,7 @@ class MainWindow(QMainWindow):
         """引擎后端加载状态 → 状态栏文案：loading/ready/error:..."""
         if text == "loading":
             self._player_bar.set_backend_status(
-                "正在加载情感引擎（首次约 30-60 秒）…")
+                "正在加载情感引擎（首次约 2-4 分钟）…")
         elif text == "ready":
             self._player_bar.set_backend_status("情感引擎就绪")
         elif text.startswith("error:"):

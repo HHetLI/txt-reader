@@ -97,7 +97,7 @@ class IndexTTSBackend:
         self._spk_audio_prompt = resolve_spk_audio_prompt(
             Path(spk_audio_prompt) if spk_audio_prompt is not None else None)
         # 加载取消标记：worker 退役时置位，load() 在检查点快速抛错返回，
-        # 避免退役线程在 30-60s 模型加载中长期滞留（QThread GC 崩溃窗口）
+        # 避免退役线程在 2-4 分钟模型加载中长期滞留（QThread GC 崩溃窗口）
         self._load_cancelled = False
         if self._load_lock is None:
             import threading
@@ -119,7 +119,8 @@ class IndexTTSBackend:
         return IndexTTSBackend._tts is not None
 
     def load(self) -> None:
-        """加载模型（首次调用，约 30-60s）。线程安全，可被 cancel_load 取消。"""
+        """加载模型（首次调用，约 2-4 分钟，实测 264s 含 QwenEmotion）。
+        线程安全，可被 cancel_load 取消。"""
         if IndexTTSBackend._tts is not None:
             return
         with self._load_lock:
@@ -142,9 +143,11 @@ class IndexTTSBackend:
                     # 不加载则 synthesize(use_emo_text=True) 抛 RuntimeError。
                     use_qwen_emo=True,
                 )
-                # 检查点：构造期间收到取消 → 卸载并放弃，线程立即结束
+                # 检查点：构造期间收到取消 → 本次加载放弃（抛"已取消"让线程立即
+                # 结束），但已构造的模型有效，保留在类级单例中供后续 load() 复用
+                # （unload 会白扔一次 264s 的构造结果；且锁后等待的新 worker 会在
+                # 下一轮 load() 直接命中 _tts is not None 立即返回）。
                 if self._load_cancelled:
-                    self.unload()
                     raise TTSBackendError("IndexTTS 模型加载已取消")
             except TTSBackendError:
                 raise

@@ -2,8 +2,9 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QDialog, QFileDialog, QMainWindow, QMessageBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractButton, QApplication, QComboBox,
+                               QDialog, QFileDialog, QLineEdit, QMainWindow,
+                               QMessageBox, QVBoxLayout, QWidget)
 
 from core.chapter_splitter import split_chapters
 from core.encoding import read_text_file
@@ -59,6 +60,17 @@ class MainWindow(QMainWindow):
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
 
+        # 播放控制（快捷键同款，便于键盘用户）
+        play_menu = menu.addMenu("播放")
+        play_menu.addAction("播放/暂停\tSpace").triggered.connect(
+            self._on_play_toggled)
+        play_menu.addAction("停止\tCtrl+S").triggered.connect(self._on_stop)
+        play_menu.addSeparator()
+        play_menu.addAction("上一章\tCtrl+PageUp").triggered.connect(
+            self._on_prev)
+        play_menu.addAction("下一章\tCtrl+PageDown").triggered.connect(
+            self._on_next)
+
         # 章节选择收敛到菜单栏：跳转对话框 + 快速前后翻章
         chapter_menu = menu.addMenu("章节")
         jump_action = chapter_menu.addAction("跳转到章节…")
@@ -73,28 +85,66 @@ class MainWindow(QMainWindow):
         next_action.triggered.connect(self._on_next)
 
         settings_menu = menu.addMenu("设置")
-        settings_menu.addAction("字号 +").triggered.connect(
-            lambda: self._reader.set_font_size(self._reader._font_size + 1))
-        settings_menu.addAction("字号 -").triggered.connect(
-            lambda: self._reader.set_font_size(max(8, self._reader._font_size - 1)))
+        settings_menu.addAction("字号 +\tCtrl+=").triggered.connect(
+            lambda: self._zoom_font(1))
+        settings_menu.addAction("字号 -\tCtrl+-").triggered.connect(
+            lambda: self._zoom_font(-1))
+        settings_menu.addAction("复位字号\tCtrl+0").triggered.connect(
+            self._reset_font)
         settings_menu.addSeparator()
-        settings_menu.addAction("行距 +").triggered.connect(
+        settings_menu.addAction("行距 +\tCtrl+Shift+=").triggered.connect(
             lambda: self._reader.set_line_spacing(round(self._reader._line_spacing + 0.2, 1)))
-        settings_menu.addAction("行距 -").triggered.connect(
+        settings_menu.addAction("行距 -\tCtrl+Shift+-").triggered.connect(
             lambda: self._reader.set_line_spacing(max(1.0, round(self._reader._line_spacing - 0.2, 1))))
         settings_menu.addSeparator()
-        search_action = settings_menu.addAction("在正文中搜索\tCtrl+F")
-        search_action.triggered.connect(self._open_search)
+        settings_menu.addAction("在正文中搜索\tCtrl+F").triggered.connect(self._open_search)
+        settings_menu.addAction("全屏\tF11").triggered.connect(self._toggle_fullscreen)
 
     def _setup_shortcuts(self) -> None:
-        """全局搜索快捷键：Ctrl+F 打开，F3 下一个，Esc 关闭。"""
+        """全局快捷键：播放控制 / 搜索 / 字号 / 全屏。"""
+        # 播放控制
+        QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._on_space_shortcut)
+        QShortcut(QKeySequence("Ctrl+S"), self, self._on_stop)
+        # 搜索
         QShortcut(QKeySequence.StandardKey.Find, self, self._open_search)
         QShortcut(QKeySequence(Qt.Key.Key_F3), self, self._on_find_next)
-        # Esc 关闭：输入框和正文区聚焦时均生效
+        # Esc 关闭搜索：输入框和正文区聚焦时均生效
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self._search_bar,
                   self._close_search)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self._reader,
                   self._close_search)
+        # 字号
+        QShortcut(QKeySequence.StandardKey.ZoomIn, self,
+                  lambda: self._zoom_font(1))
+        QShortcut(QKeySequence.StandardKey.ZoomOut, self,
+                  lambda: self._zoom_font(-1))
+        QShortcut(QKeySequence("Ctrl+0"), self, self._reset_font)
+        # 行距
+        QShortcut(QKeySequence("Ctrl+Shift+="), self,
+                  lambda: self._reader.set_line_spacing(round(self._reader._line_spacing + 0.2, 1)))
+        QShortcut(QKeySequence("Ctrl+Shift+-"), self,
+                  lambda: self._reader.set_line_spacing(max(1.0, round(self._reader._line_spacing - 0.2, 1))))
+        # 全屏
+        QShortcut(QKeySequence(Qt.Key.Key_F11), self, self._toggle_fullscreen)
+
+    def _on_space_shortcut(self) -> None:
+        """空格：播放/暂停。输入控件聚焦时放行（避免吃空格/误触按钮）。"""
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QComboBox, QAbstractButton)):
+            return
+        self._on_play_toggled()
+
+    def _zoom_font(self, delta: int) -> None:
+        self._reader.set_font_size(max(8, self._reader._font_size + delta))
+
+    def _reset_font(self) -> None:
+        self._reader.set_font_size(16)
+
+    def _toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
 
     def _connect_signals(self) -> None:
         self._player_bar.play_toggled.connect(self._on_play_toggled)

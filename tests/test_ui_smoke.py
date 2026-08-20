@@ -3,6 +3,8 @@ def test_import_core_packages():
     import ui  # noqa: F401
 
 
+from PySide6.QtWidgets import QApplication
+
 from ui.reader_view import ReaderView
 
 
@@ -393,6 +395,66 @@ def test_main_window_search_open_close(qapp):
     assert not win._search_bar.isHidden()
     win._close_search()
     assert win._search_bar.isHidden()
+
+
+# ---------- 快捷键 ----------
+
+
+def test_main_window_space_shortcut_plays(qapp, monkeypatch):
+    """无输入控件聚焦时，空格触发播放/暂停。"""
+    win = MainWindow()
+    calls: list[str] = []
+    monkeypatch.setattr(win, "_on_play_toggled", lambda: calls.append("play"))
+    monkeypatch.setattr(QApplication, "focusWidget", lambda: None)
+    win._on_space_shortcut()
+    assert calls == ["play"]
+
+
+def test_main_window_space_shortcut_ignores_input_widgets(qapp, monkeypatch):
+    """搜索框/下拉框/按钮聚焦时，空格放行给控件（不吃输入、不劫持按钮）。"""
+    from PySide6.QtWidgets import QComboBox, QLineEdit, QPushButton
+    win = MainWindow()
+    calls: list[str] = []
+    monkeypatch.setattr(win, "_on_play_toggled", lambda: calls.append("play"))
+    for widget in (QLineEdit(), QComboBox(), QPushButton()):
+        monkeypatch.setattr(QApplication, "focusWidget", lambda w=widget: w)
+        win._on_space_shortcut()
+    assert calls == []
+
+
+def test_main_window_zoom_font_shortcuts(qapp):
+    """Ctrl+= / Ctrl+- / Ctrl+0：字号增减与复位（下限 8）。"""
+    win = MainWindow()
+    win._zoom_font(2)
+    assert win._reader._font_size == 18
+    win._zoom_font(-5)
+    assert win._reader._font_size == 13
+    win._zoom_font(-20)  # 下限保护
+    assert win._reader._font_size == 8
+    win._reset_font()
+    assert win._reader._font_size == 16
+
+
+def test_main_window_toggle_fullscreen(qapp):
+    """F11 全屏切换：双向调用不抛错（offscreen 状态不可靠，仅验证路径）。"""
+    win = MainWindow()
+    win._toggle_fullscreen()
+    win._toggle_fullscreen()
+
+
+def test_main_window_stop_shortcut(qapp):
+    """Ctrl+S：停止播放并更新状态栏。"""
+    win = MainWindow()
+    win._chapters = [{"title": "第一章", "content": "甲。"}]
+    win._on_stop()
+    assert win._player_bar._status.text() == "已停止"
+
+
+def test_main_window_has_play_menu(qapp):
+    """菜单栏包含『播放』菜单（键盘用户的发现入口）。"""
+    win = MainWindow()
+    titles = [a.text() for a in win.menuBar().actions() if a.text()]
+    assert "播放" in titles
 
 
 def test_main_window_search_wires_to_reader(qapp):

@@ -467,6 +467,34 @@ class TtsEngine(QObject):
             return bool(getattr(self._backend, "is_loaded", lambda: False)())
         return True
 
+    def preload_indextts(self) -> bool:
+        """后台预加载 IndexTTS 模型（应用启动时调用）。
+
+        加载 80-260s 是首句等待的主要来源；启动后立即后台加载，用户
+        阅读/翻书期间模型就绪，点播放时立即可用。返回是否开始预加载。
+        预加载与播放并发安全（load 有类级锁 + 单例双重检查）。
+        """
+        if self._backend_name != "indextts":
+            return False
+        backend = self._backend
+        if bool(getattr(backend, "is_loaded", lambda: False)()):
+            return False
+        if not bool(getattr(backend, "is_available", lambda: False)()):
+            return False
+        self.backend_status.emit("loading")
+
+        def on_done() -> None:
+            # 后台线程回调；Qt 信号跨线程 emit 自动排队到接收者线程
+            loaded = bool(getattr(self._backend, "is_loaded", lambda: False)())
+            if loaded:
+                self.backend_status.emit("ready")
+            else:
+                self.backend_status.emit(
+                    "error:IndexTTS2.5 模型预加载失败，播放时将重试")
+
+        getattr(backend, "preload")(on_done=on_done)
+        return True
+
     # ---------- 内部 ----------
 
     def _start_chapter(self, index: int, start_sentence: int = 0) -> None:

@@ -12,6 +12,8 @@ def main() -> None:
     apply_theme(app)  # 深色主题先于窗口应用
     window = MainWindow()
     window.show()
+    # 后台预加载 IndexTTS 模型：加载 80-260s，启动即加载，播放时免等待
+    window.preload_backend()
     sys.exit(app.exec())
 
 

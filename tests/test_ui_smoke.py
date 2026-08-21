@@ -486,6 +486,16 @@ def test_main_window_has_play_menu(qapp):
     assert "播放" in titles
 
 
+def test_main_window_preload_backend(qapp, monkeypatch):
+    """启动后 preload_backend → 转发引擎预加载。"""
+    win = MainWindow()
+    calls: list[str] = []
+    monkeypatch.setattr(win._engine, "preload_indextts",
+                        lambda: calls.append("p") or True)
+    assert win.preload_backend() is True
+    assert calls == ["p"]
+
+
 # ---------- 主题 / 最近打开 / 窗口状态 / 章末导航 ----------
 
 

@@ -1,6 +1,7 @@
 """TTS 后端统一接口：edge-tts（快速）与 IndexTTS2.5（情感朗读）可切换。"""
 
 import os
+import threading
 from pathlib import Path
 
 import edge_tts
@@ -117,6 +118,7 @@ class IndexTTSBackend:
     _model_dir: Path | None = None
     _tts = None  # IndexTTS2 实例（懒加载）
     _load_lock = None  # threading.Lock
+    _preload_thread = None  # 预加载后台线程（防重复启动）
 
     def __init__(self, model_dir: Path | None = None,
                  spk_audio_prompt: Path | str | None = None):
@@ -147,6 +149,35 @@ class IndexTTSBackend:
 
     def is_loaded(self) -> bool:
         return IndexTTSBackend._tts is not None
+
+    def preload(self, on_done=None) -> bool:
+        """后台线程预加载模型（不阻塞调用线程）。
+
+        已加载/模型不可用/已在预加载时返回 False。on_done 在后台线程
+        执行（成功或失败都会调用），用于上报状态；失败无碍——播放时
+        合成路径会再次尝试并正常报错。
+        """
+        if self.is_loaded():
+            return False
+        if not self.is_available():
+            return False
+        if IndexTTSBackend._preload_thread is not None:
+            return False
+
+        def _run() -> None:
+            try:
+                self.load()
+            except Exception:  # noqa: BLE001
+                pass  # 预加载失败静默：播放时合成路径会重试并上报
+            finally:
+                IndexTTSBackend._preload_thread = None
+                if on_done:
+                    on_done()
+
+        IndexTTSBackend._preload_thread = threading.Thread(
+            target=_run, daemon=True)
+        IndexTTSBackend._preload_thread.start()
+        return True
 
     def load(self) -> None:
         """加载模型（首次调用，约 2-4 分钟，实测 264s 含 QwenEmotion）。

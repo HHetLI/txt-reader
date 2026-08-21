@@ -302,6 +302,10 @@ class MainWindow(QMainWindow):
             self._tray.hide()
         QApplication.quit()
 
+    def preload_backend(self) -> bool:
+        """启动后后台预加载 IndexTTS 模型（main.py 调用，听书首句加速）。"""
+        return self._engine.preload_indextts()
+
     # ---------- 信号连接 ----------
 
     def _connect_signals(self) -> None:

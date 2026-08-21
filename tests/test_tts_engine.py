@@ -786,3 +786,58 @@ def test_set_voice_edge_keeps_voice(qtbot, monkeypatch):
     engine.set_voice("zh-CN-YunxiNeural")
     assert engine._voice == "zh-CN-YunxiNeural"
     assert calls == []  # edge 不调用参考音频
+
+
+# ---------- 模型预加载 ----------
+
+
+def test_preload_indextts_starts_background_load(qtbot, monkeypatch):
+    """IndexTTS 可用时：preload_indextts 开始预加载，状态 loading→ready。"""
+    engine = TtsEngine()
+    statuses: list[str] = []
+    engine.backend_status.connect(statuses.append)
+    loaded = {"v": False}
+
+    class _FakeIndexBackend:
+        name = "indextts"
+
+        def is_loaded(self):
+            return loaded["v"]
+
+        def is_available(self):
+            return True
+
+        def preload(self, on_done=None):
+            loaded["v"] = True  # 模拟后台加载成功
+            if on_done:
+                on_done()
+            return True
+
+    engine._backend = _FakeIndexBackend()
+    assert engine.preload_indextts() is True
+    assert statuses == ["loading", "ready"]
+    assert engine.backend_ready() is True
+
+
+def test_preload_indextts_skips_when_edge(qtbot):
+    """edge 后端不预加载。"""
+    engine = TtsEngine()
+    engine._backend_name = "edge"
+    assert engine.preload_indextts() is False
+
+
+def test_preload_indextts_skips_when_unavailable(qtbot):
+    """模型不可用（未安装/缺权重）不预加载。"""
+    engine = TtsEngine()
+
+    class _FakeIndexBackend:
+        name = "indextts"
+
+        def is_loaded(self):
+            return False
+
+        def is_available(self):
+            return False
+
+    engine._backend = _FakeIndexBackend()
+    assert engine.preload_indextts() is False

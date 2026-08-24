@@ -6,9 +6,12 @@ import edge_tts
 from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 
+from core.logging_setup import get_logger
 from core.sentence_splitter import split_sentences_with_offsets
 from core.tts_backend import (EdgeTTSBackend, IndexTTSBackend, TTSBackendError,
                               sentence_limit_for_backend)
+
+logger = get_logger("tts_engine")
 
 
 async def synthesize_sentence(sentence: str, voice: str, rate: str, out_path: Path) -> None:
@@ -101,6 +104,8 @@ class _SynthesisWorker(QThread):
                     try:
                         load()
                     except Exception as exc:  # noqa: BLE001
+                        logger.error("worker 内 IndexTTS 加载失败: %s", exc,
+                                     exc_info=True)
                         self.backend_status.emit(f"error:{exc}")
                         return
                     finally:
@@ -475,11 +480,15 @@ class TtsEngine(QObject):
         预加载与播放并发安全（load 有类级锁 + 单例双重检查）。
         """
         if self._backend_name != "indextts":
+            logger.debug("preload_indextts 跳过：当前后端=%s",
+                         self._backend_name)
             return False
         backend = self._backend
         if bool(getattr(backend, "is_loaded", lambda: False)()):
+            logger.debug("preload_indextts 跳过：已加载")
             return False
         if not bool(getattr(backend, "is_available", lambda: False)()):
+            logger.warning("preload_indextts 跳过：模型不可用（is_available=False）")
             return False
         self.backend_status.emit("loading")
 
@@ -487,12 +496,15 @@ class TtsEngine(QObject):
             # 后台线程回调；Qt 信号跨线程 emit 自动排队到接收者线程
             loaded = bool(getattr(self._backend, "is_loaded", lambda: False)())
             if loaded:
+                logger.info("IndexTTS 预加载成功（启动后台加载）")
                 self.backend_status.emit("ready")
             else:
+                logger.warning("IndexTTS 预加载失败（on_done 时仍未加载）")
                 self.backend_status.emit(
                     "error:IndexTTS2.5 模型预加载失败，播放时将重试")
 
         getattr(backend, "preload")(on_done=on_done)
+        logger.info("IndexTTS 后台预加载已启动")
         return True
 
     # ---------- 内部 ----------
@@ -509,9 +521,11 @@ class TtsEngine(QObject):
             else:
                 try:
                     available = bool(is_available())
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("is_available 检查异常: %s", exc, exc_info=True)
                     available = False
             if not available:
+                logger.warning("IndexTTS 不可用，同步回退 edge-tts（start_chapter）")
                 self._backend_status = "error:IndexTTS2.5 模型未安装，已自动回退 edge-tts"
                 self.backend_status.emit(self._backend_status)
                 self._backend_name = "edge"
@@ -605,11 +619,13 @@ class TtsEngine(QObject):
         if generation != self._generation:
             return
         if text.startswith("error:"):
+            logger.warning("worker 后端状态错误: %s", text)
             self.backend_status.emit(text)
             if not self.has_session():
                 return
             # IndexTTS 懒加载/合成失败（OOM、模型故障等）：切 edge 并重启会话
             reason = text[len("error:"):]
+            logger.warning("IndexTTS 失败，切换至 edge-tts：%s", reason)
             self._backend_name = "edge"
             self._backend = _backend_factory("edge")
             self._backend_status = f"error:{reason}，已切换至 edge-tts"
@@ -618,6 +634,7 @@ class TtsEngine(QObject):
             self._start_chapter(self._chapter_index,
                                 start_sentence=max(0, self._next_index - 1))
         else:
+            logger.debug("worker 后端状态: %s", text)
             self._backend_status = text
             self.backend_status.emit(text)
 

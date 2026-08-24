@@ -1,10 +1,15 @@
 """TTS 后端统一接口：edge-tts（快速）与 IndexTTS2.5（情感朗读）可切换。"""
 
+import logging
 import os
 import threading
 from pathlib import Path
 
 import edge_tts
+
+from core.logging_setup import get_logger
+
+logger = get_logger("tts_backend")
 
 EMO_MODE_AUTO = "auto"
 
@@ -34,24 +39,29 @@ _INDEXTTS_REPO_CANDIDATES = (
 )
 
 
-def _ensure_indextts_importable() -> None:
+def _ensure_indextts_importable() -> bool:
     """确保 `import indextts` 可用：若当前解释器无法导入，则把仓库根加入 sys.path。
 
     indextts 是源码包（index-tts 仓库根目录下的 indextts/），通常未 pip 安装，
     依赖仓库根在 sys.path。探测常见 clone 位置，命中则插入 sys.path 首位。
-    若探测失败但环境中已可导入（如已安装），静默通过。
+    返回是否可导入。
     """
     import sys
     try:
         import indextts  # noqa: F401
-        return
-    except ImportError:
-        pass
+        logger.debug("indextts 已可导入: %s", getattr(indextts, "__file__", "?"))
+        return True
+    except ImportError as exc:
+        logger.debug("import indextts 失败: %s", exc)
     for candidate in _INDEXTTS_REPO_CANDIDATES:
         if Path(candidate, "indextts", "__init__.py").is_file():
             if candidate not in sys.path:
                 sys.path.insert(0, candidate)
-            return
+            logger.info("indextts 仓库命中候选路径: %s", candidate)
+            return True
+    logger.warning("indextts 仓库未在任何候选位置找到: %s",
+                   list(_INDEXTTS_REPO_CANDIDATES))
+    return False
 
 
 def emo_mode_to_vector(mode: str, strength: float) -> list[float] | None:
@@ -141,11 +151,18 @@ class IndexTTSBackend:
     def is_available(self) -> bool:
         """模型权重与 indextts 包是否就绪（含仓库路径探测）。"""
         try:
-            _ensure_indextts_importable()
+            if not _ensure_indextts_importable():
+                logger.warning("IndexTTS 不可用：无法导入 indextts 包")
+                return False
             import indextts  # noqa: F401
-        except ImportError:
+        except ImportError as exc:
+            logger.warning("IndexTTS 不可用：导入 indextts 失败: %s", exc)
             return False
-        return (self._model_dir / "config.yaml").exists()
+        cfg = self._model_dir / "config.yaml"
+        ok = cfg.exists()
+        if not ok:
+            logger.warning("IndexTTS 不可用：模型权重缺失 %s", cfg)
+        return ok
 
     def is_loaded(self) -> bool:
         return IndexTTSBackend._tts is not None
@@ -158,34 +175,45 @@ class IndexTTSBackend:
         合成路径会再次尝试并正常报错。
         """
         if self.is_loaded():
+            logger.debug("preload 跳过：已加载")
             return False
         if not self.is_available():
+            logger.warning("preload 跳过：模型不可用")
             return False
         if IndexTTSBackend._preload_thread is not None:
+            logger.debug("preload 跳过：已有预加载线程在运行")
             return False
 
         def _run() -> None:
+            logger.info("IndexTTS 预加载线程启动")
             try:
                 self.load()
-            except Exception:  # noqa: BLE001
-                pass  # 预加载失败静默：播放时合成路径会重试并上报
+                logger.info("IndexTTS 预加载完成")
+            except Exception as exc:  # noqa: BLE001
+                logger.error("IndexTTS 预加载失败: %s", exc, exc_info=True)
             finally:
                 IndexTTSBackend._preload_thread = None
                 if on_done:
                     on_done()
 
         IndexTTSBackend._preload_thread = threading.Thread(
-            target=_run, daemon=True)
+            target=_run, daemon=True, name="indextts-preload")
         IndexTTSBackend._preload_thread.start()
+        logger.info("IndexTTS 预加载线程已启动")
         return True
 
     def load(self) -> None:
         """加载模型（首次调用，约 2-4 分钟，实测 264s 含 QwenEmotion）。
         线程安全，可被 cancel_load 取消。"""
         if IndexTTSBackend._tts is not None:
+            logger.debug("load 跳过：模型已加载")
             return
+        import time as _time
+        t0 = _time.monotonic()
+        logger.info("IndexTTS 模型加载开始（model_dir=%s）", self._model_dir)
         with self._load_lock:
             if IndexTTSBackend._tts is not None:
+                logger.debug("load 跳过：模型已加载（锁内检查）")
                 return
             # 新加载尝试应允许重试（取消标志仅针对单次加载，须在首个检查点前重置）
             self._load_cancelled = False
@@ -196,9 +224,12 @@ class IndexTTSBackend:
                 # 使 `import indextts` 可用（应用与 index-tts 仓库分离部署）
                 _ensure_indextts_importable()
                 from indextts.infer_v2_5 import IndexTTS2
+                logger.info("indextts.infer_v2_5 导入完成（%.1fs）",
+                            _time.monotonic() - t0)
                 # 检查点：import（含 torch 等重依赖）结束后仍被取消则放弃
                 if self._load_cancelled:
                     raise TTSBackendError("IndexTTS 模型加载已取消")
+                logger.info("开始构造 IndexTTS2 实例（含 QwenEmotion）…")
                 IndexTTSBackend._tts = IndexTTS2(
                     cfg_path=str(self._model_dir / "config.yaml"),
                     model_dir=str(self._model_dir),
@@ -212,6 +243,8 @@ class IndexTTSBackend:
                     # 不加载则 synthesize(use_emo_text=True) 抛 RuntimeError。
                     use_qwen_emo=True,
                 )
+                logger.info("IndexTTS2 构造完成，总耗时 %.1fs",
+                            _time.monotonic() - t0)
                 # 检查点：构造期间收到取消 → 本次加载放弃（抛"已取消"让线程立即
                 # 结束），但已构造的模型有效，保留在类级单例中供后续 load() 复用
                 # （unload 会白扔一次 264s 的构造结果；且锁后等待的新 worker 会在
@@ -221,6 +254,7 @@ class IndexTTSBackend:
             except TTSBackendError:
                 raise
             except Exception as exc:  # noqa: BLE001
+                logger.error("IndexTTS2.5 模型加载失败: %s", exc, exc_info=True)
                 raise TTSBackendError(
                     f"IndexTTS2.5 模型加载失败: {exc}") from exc
 
@@ -248,6 +282,10 @@ class IndexTTSBackend:
         if not self.is_available():
             raise TTSBackendError("IndexTTS2.5 模型未安装，请先运行环境准备")
         import asyncio
+        import time as _time
+        t0 = _time.monotonic()
+        logger.info("IndexTTS 合成开始：mode=%s strength=%.2f 文本=%d字 -> %s",
+                    emo_mode, emo_strength, len(text), out_path)
 
         def _run() -> None:
             self.load()
@@ -265,5 +303,7 @@ class IndexTTSBackend:
 
         try:
             await asyncio.to_thread(_run)
+            logger.info("IndexTTS 合成完成（%.1fs）", _time.monotonic() - t0)
         except Exception as exc:  # noqa: BLE001
+            logger.error("IndexTTS 合成失败: %s", exc, exc_info=True)
             raise TTSBackendError(str(exc)) from exc

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtMultimedia import QMediaPlayer
 
-from core.tts_backend import EdgeTTSBackend, TTSBackendError
+from core.tts_backend import (EdgeTTSBackend, IndexTTSBackend, TTSBackendError)
 from core.tts_engine import TtsEngine, _SynthesisWorker
 
 
@@ -841,3 +841,49 @@ def test_preload_indextts_skips_when_unavailable(qtbot):
 
     engine._backend = _FakeIndexBackend()
     assert engine.preload_indextts() is False
+
+
+# ---------- 模型卸载（显存释放） ----------
+
+
+def test_unload_indextts_stops_active_session(qtbot, monkeypatch):
+    """IndexTTS 播放会话进行中：卸载前自动停止播放，再释放模型。"""
+    engine = TtsEngine()
+    engine._backend_name = "indextts"
+    engine._worker = object()  # has_session() → True
+    stopped: list[str] = []
+    monkeypatch.setattr(engine, "stop", lambda: stopped.append("stop"))
+    unloaded: list[str] = []
+    monkeypatch.setattr(
+        IndexTTSBackend, "unload",
+        classmethod(lambda cls: (unloaded.append("unload"), True)[1]))
+    assert engine.unload_indextts() == (True, True)
+    assert stopped == ["stop"]
+    assert unloaded == ["unload"]
+
+
+def test_unload_indextts_when_edge_backend_still_unloads(qtbot, monkeypatch):
+    """当前引擎是 edge 时模型可能仍驻留（类级单例）：仍卸载，但不停止播放。"""
+    engine = TtsEngine()
+    engine._backend_name = "edge"
+    engine._worker = object()  # edge 会话播放中
+    stopped: list[str] = []
+    monkeypatch.setattr(engine, "stop", lambda: stopped.append("stop"))
+    unloaded: list[str] = []
+    monkeypatch.setattr(
+        IndexTTSBackend, "unload",
+        classmethod(lambda cls: (unloaded.append("unload"), True)[1]))
+    assert engine.unload_indextts() == (True, False)
+    assert stopped == []  # edge 会话不受影响
+    assert unloaded == ["unload"]
+
+
+def test_unload_indextts_not_loaded_returns_false(qtbot, monkeypatch):
+    """模型未加载：返回 (False, False)，不停止任何会话。"""
+    engine = TtsEngine()
+    engine._backend_name = "indextts"
+    stopped: list[str] = []
+    monkeypatch.setattr(engine, "stop", lambda: stopped.append("stop"))
+    monkeypatch.setattr(IndexTTSBackend, "unload", classmethod(lambda cls: False))
+    assert engine.unload_indextts() == (False, False)
+    assert stopped == []

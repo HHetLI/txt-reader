@@ -507,6 +507,20 @@ class TtsEngine(QObject):
         logger.info("IndexTTS 后台预加载已启动")
         return True
 
+    def unload_indextts(self) -> tuple[bool, bool]:
+        """卸载 IndexTTS 模型并真正释放显存。
+
+        若正在用 IndexTTS 播放（后端为 indextts 且有会话）先自动停止，
+        防止合成线程使用被卸载的模型。模型以类级单例驻留，不依赖当前
+        引擎选择（切到 edge 后仍驻留），故直接调 IndexTTSBackend.unload。
+        返回 (是否执行了卸载, 是否自动停止了播放)。
+        """
+        stopped = False
+        if self._backend_name == "indextts" and self.has_session():
+            self.stop()
+            stopped = True
+        return IndexTTSBackend.unload(), stopped
+
     # ---------- 内部 ----------
 
     def _start_chapter(self, index: int, start_sentence: int = 0) -> None:

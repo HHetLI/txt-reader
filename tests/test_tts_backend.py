@@ -373,3 +373,45 @@ def test_unload_without_cuda_skips_empty_cache(monkeypatch):
     assert IndexTTSBackend.unload() is True
     assert calls == []
     IndexTTSBackend._tts = None
+
+
+def test_unload_torch_import_error_skips_gracefully(monkeypatch):
+    """torch 导入失败（ImportError）时 unload 不抛异常，模型仍卸载。"""
+    import builtins
+    IndexTTSBackend._tts = object()
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "torch":
+            raise ImportError("sentinel-torch-missing")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert IndexTTSBackend.unload() is True
+    assert IndexTTSBackend._tts is None
+
+
+def test_unload_empty_cache_failure_is_observable(monkeypatch, caplog):
+    """empty_cache 抛异常时：unload 仍完成（单例置空），但记录 warning 可观察。"""
+    import logging
+    import sys
+    import types
+    IndexTTSBackend._tts = object()
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def empty_cache():
+            raise RuntimeError("cuda-oom")
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.cuda = _FakeCuda()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    with caplog.at_level(logging.WARNING, logger="t2voice.tts_backend"):
+        assert IndexTTSBackend.unload() is True
+    assert IndexTTSBackend._tts is None
+    assert any("显存释放失败" in r.message for r in caplog.records)

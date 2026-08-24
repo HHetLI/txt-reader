@@ -279,8 +279,11 @@ class IndexTTSBackend:
                 import torch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-            except Exception:  # noqa: BLE001
-                pass
+            except ImportError:
+                pass  # torch 未安装：无 CUDA 可释放
+            except Exception as exc:  # noqa: BLE001
+                # empty_cache 失败可观察：unload 已置空单例，但显存缓存未清
+                logger.warning("IndexTTS 显存释放失败（empty_cache 异常）: %s", exc)
             return True
 
     def set_reference_audio(self, path: Path | str | None) -> None:

@@ -142,6 +142,14 @@ class MainWindow(QMainWindow):
                 lambda checked=False, d=desc: self._apply_audio_device(d))
             self._audio_actions.append(act)
         settings_menu.addSeparator()
+        self._model_action = settings_menu.addAction("IndexTTS 模型（显存占用）")
+        self._model_action.setCheckable(True)
+        self._model_action.setChecked(True)  # 默认勾选：启动自动加载
+        self._model_action.setToolTip(
+            "勾选=加载模型（后台，约 2-4 分钟）；取消勾选=卸载模型释放显存")
+        # 先 setChecked 再 connect：避免初始化触发 toggled 回调
+        self._model_action.toggled.connect(self._on_model_toggle)
+        settings_menu.addSeparator()
         settings_menu.addAction("字号 +\tCtrl+=").triggered.connect(
             lambda: self._zoom_font(1))
         settings_menu.addAction("字号 -\tCtrl+-").triggered.connect(
@@ -500,15 +508,42 @@ class MainWindow(QMainWindow):
         """情感模式/强度变化 → 保存到引擎（IndexTTS 模式生效）。"""
         self._engine.set_emotion(mode, strength)
 
+    def _on_model_toggle(self, checked: bool) -> None:
+        """设置菜单『IndexTTS 模型』开关：勾选=后台加载，取消勾选=卸载释放显存。"""
+        if checked:
+            self._engine.preload_indextts()
+            return
+        unloaded, stopped = self._engine.unload_indextts()
+        if unloaded:
+            prefix = "已停止播放并卸载" if stopped else "已卸载"
+            self._player_bar.set_status(
+                f"{prefix} IndexTTS 模型，显存已释放")
+
     def _on_backend_status(self, text: str) -> None:
-        """引擎后端加载状态 → 状态栏文案：loading/ready/error:..."""
+        """引擎后端加载状态 → 状态栏文案 + 模型开关状态联动。"""
         if text == "loading":
             self._player_bar.set_backend_status(
                 "正在加载情感引擎（首次约 2-4 分钟）…")
+            self._model_action.setEnabled(False)  # 加载中禁用，防重复触发
+            self._model_action.setText("IndexTTS 模型（加载中…）")
         elif text == "ready":
             self._player_bar.set_backend_status("情感引擎就绪")
+            self._model_action.setEnabled(True)
+            self._model_action.setText("IndexTTS 模型（显存占用）")
+            if not self._model_action.isChecked():
+                # blockSignals：状态同步不应触发 _on_model_toggle（避免冗余预加载）
+                self._model_action.blockSignals(True)
+                self._model_action.setChecked(True)  # 加载完成 → 勾选同步
+                self._model_action.blockSignals(False)
         elif text.startswith("error:"):
             self._player_bar.set_backend_status(text[len("error:"):])
+            self._model_action.setEnabled(True)
+            self._model_action.setText("IndexTTS 模型（显存占用）")
+            if self._model_action.isChecked():
+                # blockSignals：防止 toggled(False) → unload 的提示文案覆盖错误信息
+                self._model_action.blockSignals(True)
+                self._model_action.setChecked(False)  # 加载失败 → 取消勾选
+                self._model_action.blockSignals(False)
         else:
             self._player_bar.set_backend_status(text)
 

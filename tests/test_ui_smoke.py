@@ -3,7 +3,7 @@ def test_import_core_packages():
     import ui  # noqa: F401
 
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
 
 from ui.reader_view import ReaderView
 
@@ -881,3 +881,66 @@ def test_player_bar_voice_combo_repopulates_on_backend_switch(qapp):
     # 切回 indextts：仍保持
     bar._engine_combo.setCurrentIndex(bar._engine_combo.findData("indextts"))
     assert bar.voice() == "zh-CN-YunjianNeural"
+
+
+# ---------- IndexTTS 模型加载/卸载开关 ----------
+
+
+def test_main_window_has_model_toggle_action(qapp):
+    """设置菜单含可勾选『IndexTTS 模型』开关，默认勾选（启动自动加载）。"""
+    win = MainWindow()
+    # 注：a.menu() 返回的 QMenu 包装器会被 PySide6 GC 回收（Internal C++
+    # object already deleted），改用 findChildren 保持引用安全。
+    menus = [m for m in win.findChildren(QMenu) if m.title() == "设置"]
+    assert menus and menus[0] is not None
+    acts = [a for a in menus[0].actions() if "IndexTTS 模型" in a.text()]
+    assert len(acts) == 1
+    assert acts[0].isCheckable()
+    assert acts[0].isChecked()
+
+
+def test_main_window_model_toggle_unload(qapp, monkeypatch):
+    """取消勾选 → 卸载模型 + 状态栏提示显存已释放。"""
+    win = MainWindow()
+    calls: list[str] = []
+    monkeypatch.setattr(win._engine, "unload_indextts",
+                        lambda: (calls.append("u") or (True, False)))
+    win._model_action.setChecked(False)  # 触发 toggled(False)
+    assert calls == ["u"]
+    assert "显存已释放" in win._player_bar._status.text()
+
+
+def test_main_window_model_toggle_unload_stopped_playback(qapp, monkeypatch):
+    """卸载时若自动停止了播放，提示包含『已停止播放』。"""
+    win = MainWindow()
+    monkeypatch.setattr(win._engine, "unload_indextts", lambda: (True, True))
+    win._model_action.setChecked(False)
+    assert "已停止播放" in win._player_bar._status.text()
+
+
+def test_main_window_model_toggle_load(qapp, monkeypatch):
+    """勾选 → 后台预加载模型。"""
+    win = MainWindow()
+    calls: list[str] = []
+    monkeypatch.setattr(win._engine, "preload_indextts",
+                        lambda: calls.append("p") or True)
+    win._model_action.setChecked(False)  # 先取消，保证再次勾选触发 toggled(True)
+    monkeypatch.setattr(win._engine, "unload_indextts", lambda: (True, False))
+    win._model_action.setChecked(True)
+    assert calls == ["p"]
+
+
+def test_main_window_model_action_follows_backend_status(qapp):
+    """状态联动：loading 禁用菜单（防重复触发）、ready 恢复勾选、error 取消勾选。"""
+    win = MainWindow()
+    act = win._model_action
+    win._on_backend_status("loading")
+    assert not act.isEnabled()
+    assert "加载中" in act.text()
+    win._on_backend_status("ready")
+    assert act.isEnabled()
+    assert act.isChecked()
+    assert "IndexTTS 模型" in act.text()
+    win._on_backend_status("error:模型加载失败")
+    assert act.isEnabled()
+    assert not act.isChecked()

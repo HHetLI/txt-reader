@@ -258,8 +258,30 @@ class IndexTTSBackend:
                 raise TTSBackendError(
                     f"IndexTTS2.5 模型加载失败: {exc}") from exc
 
-    def unload(self) -> None:
-        IndexTTSBackend._tts = None
+    @classmethod
+    def unload(cls) -> bool:
+        """卸载类级单例模型并真正释放显存。
+
+        置空 _tts → gc.collect() 回收 Python 对象 → torch.cuda.empty_cache()
+        清显存缓存。返回是否执行了卸载（模型此前已加载）。与加载互斥
+        （_load_lock）；torch 不可用 / 无 CUDA 时静默跳过 empty_cache。
+        """
+        if cls._load_lock is None:
+            import threading
+            cls._load_lock = threading.Lock()
+        with cls._load_lock:
+            if cls._tts is None:
+                return False
+            cls._tts = None
+            import gc
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001
+                pass
+            return True
 
     def set_reference_audio(self, path: Path | str | None) -> None:
         """切换参考音频（音色）。接受绝对/相对路径；None 回退默认。"""

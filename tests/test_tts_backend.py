@@ -305,3 +305,71 @@ async def test_index_backend_synthesize_routes_emotion_kwargs(monkeypatch, tmp_p
     assert inferred[-1]["lang"] == "ZH"
     assert inferred[-1]["spk_audio_prompt"] == str(ref)
     IndexTTSBackend._tts = None
+
+
+# ---------- 模型卸载（显存释放） ----------
+
+
+def test_unload_clears_class_singleton(monkeypatch):
+    """unload 后类级单例置空，is_loaded() 为 False，返回 True。"""
+    IndexTTSBackend._tts = object()
+    assert IndexTTSBackend.unload() is True
+    assert IndexTTSBackend._tts is None
+    assert not IndexTTSBackend().is_loaded()
+
+
+def test_unload_calls_cuda_empty_cache(monkeypatch):
+    """unload 触发 torch.cuda.empty_cache() 真正释放显存。"""
+    import sys
+    import types
+    IndexTTSBackend._tts = object()
+    calls: list[str] = []
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def empty_cache():
+            calls.append("empty_cache")
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.cuda = _FakeCuda()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    assert IndexTTSBackend.unload() is True
+    assert calls == ["empty_cache"]
+    IndexTTSBackend._tts = None
+
+
+def test_unload_when_not_loaded_is_noop(monkeypatch):
+    """未加载时 unload 安全返回 False，无副作用。"""
+    IndexTTSBackend._tts = None
+    assert IndexTTSBackend.unload() is False
+    assert IndexTTSBackend._tts is None
+
+
+def test_unload_without_cuda_skips_empty_cache(monkeypatch):
+    """无 CUDA（is_available False）时 unload 不调 empty_cache、不抛异常。"""
+    import sys
+    import types
+    IndexTTSBackend._tts = object()
+    calls: list[str] = []
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+        @staticmethod
+        def empty_cache():
+            calls.append("empty_cache")
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.cuda = _FakeCuda()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    assert IndexTTSBackend.unload() is True
+    assert calls == []
+    IndexTTSBackend._tts = None

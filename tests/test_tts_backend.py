@@ -415,3 +415,26 @@ def test_unload_empty_cache_failure_is_observable(monkeypatch, caplog):
         assert IndexTTSBackend.unload() is True
     assert IndexTTSBackend._tts is None
     assert any("显存释放失败" in r.message for r in caplog.records)
+
+
+def test_unload_lock_timeout_skips_when_loading(monkeypatch):
+    """加载线程持有锁时：unload 1s 超时返回 False，不阻塞、不卸载。"""
+    import threading
+    IndexTTSBackend._tts = object()
+    lock = threading.Lock()
+    lock.acquire()
+    monkeypatch.setattr(IndexTTSBackend, "_load_lock", lock)
+    try:
+        assert IndexTTSBackend.unload() is False
+        assert IndexTTSBackend._tts is not None  # 未卸载
+    finally:
+        lock.release()
+        IndexTTSBackend._tts = None
+
+
+def test_unload_callable_via_instance():
+    """classmethod 实例调用同样有效（设计文档承诺的接口）。"""
+    IndexTTSBackend._tts = object()
+    backend = IndexTTSBackend()  # 实例化无副作用（仅解析参考音频路径）
+    assert backend.unload() is True
+    assert IndexTTSBackend._tts is None

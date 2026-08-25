@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import (QCloseEvent, QIcon, QKeySequence, QShortcut)
 from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QComboBox,
@@ -518,6 +518,8 @@ class MainWindow(QMainWindow):
             prefix = "已停止播放并卸载" if stopped else "已卸载"
             self._player_bar.set_status(
                 f"{prefix} IndexTTS 模型，显存已释放")
+        elif stopped:
+            self._player_bar.set_status("已停止播放（IndexTTS 模型未加载）")
 
     def _on_backend_status(self, text: str) -> None:
         """引擎后端加载状态 → 状态栏文案 + 模型开关状态联动。"""
@@ -531,19 +533,20 @@ class MainWindow(QMainWindow):
             self._model_action.setEnabled(True)
             self._model_action.setText("IndexTTS 模型（显存占用）")
             if not self._model_action.isChecked():
-                # blockSignals：状态同步不应触发 _on_model_toggle（避免冗余预加载）
-                self._model_action.blockSignals(True)
-                self._model_action.setChecked(True)  # 加载完成 → 勾选同步
-                self._model_action.blockSignals(False)
+                # QSignalBlocker：状态同步不应触发 _on_model_toggle（避免冗余预加载）
+                with QSignalBlocker(self._model_action):
+                    self._model_action.setChecked(True)  # 加载完成 → 勾选同步
         elif text.startswith("error:"):
             self._player_bar.set_backend_status(text[len("error:"):])
             self._model_action.setEnabled(True)
             self._model_action.setText("IndexTTS 模型（显存占用）")
             if self._model_action.isChecked():
-                # blockSignals：防止 toggled(False) → unload 的提示文案覆盖错误信息
-                self._model_action.blockSignals(True)
-                self._model_action.setChecked(False)  # 加载失败 → 取消勾选
-                self._model_action.blockSignals(False)
+                # 模型可能已驻留（如合成期 OOM）：真正释放显存，避免 UI
+                # 未勾选但显存驻留的误导（不提示，保留错误文案）
+                self._engine.unload_indextts()
+                # QSignalBlocker：防止 toggled(False) → unload 的提示文案覆盖错误信息
+                with QSignalBlocker(self._model_action):
+                    self._model_action.setChecked(False)  # 加载失败 → 取消勾选
         else:
             self._player_bar.set_backend_status(text)
 

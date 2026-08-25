@@ -924,15 +924,16 @@ def test_main_window_model_toggle_load(qapp, monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(win._engine, "preload_indextts",
                         lambda: calls.append("p") or True)
-    win._model_action.setChecked(False)  # 先取消，保证再次勾选触发 toggled(True)
     monkeypatch.setattr(win._engine, "unload_indextts", lambda: (True, False))
+    win._model_action.setChecked(False)  # 先取消，保证再次勾选触发 toggled(True)
     win._model_action.setChecked(True)
     assert calls == ["p"]
 
 
-def test_main_window_model_action_follows_backend_status(qapp):
+def test_main_window_model_action_follows_backend_status(qapp, monkeypatch):
     """状态联动：loading 禁用菜单（防重复触发）、ready 恢复勾选、error 取消勾选。"""
     win = MainWindow()
+    monkeypatch.setattr(win._engine, "unload_indextts", lambda: (False, False))
     act = win._model_action
     win._on_backend_status("loading")
     assert not act.isEnabled()
@@ -944,3 +945,4 @@ def test_main_window_model_action_follows_backend_status(qapp):
     win._on_backend_status("error:模型加载失败")
     assert act.isEnabled()
     assert not act.isChecked()
+    assert "模型加载失败" in win._player_bar._status.text()  # blockSignals 后错误文案不被覆盖

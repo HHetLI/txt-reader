@@ -263,13 +263,18 @@ class IndexTTSBackend:
         """卸载类级单例模型并真正释放显存。
 
         置空 _tts → gc.collect() 回收 Python 对象 → torch.cuda.empty_cache()
-        清显存缓存。返回是否执行了卸载（模型此前已加载）。与加载互斥
-        （_load_lock）；torch 不可用 / 无 CUDA 时静默跳过 empty_cache。
+        清显存缓存。返回是否执行了卸载（模型此前已加载且未被加载线程占用）。
+        锁超时 1s：加载构造中（最长 264s）无法中断，超时则跳过卸载并
+        logger.warning，避免主线程冻结；torch 不可用 / 无 CUDA 时静默跳过
+        empty_cache。
         """
         if cls._load_lock is None:
             import threading
             cls._load_lock = threading.Lock()
-        with cls._load_lock:
+        if not cls._load_lock.acquire(timeout=1.0):
+            logger.warning("IndexTTS 卸载超时：模型加载中，跳过卸载（显存保持驻留）")
+            return False
+        try:
             if cls._tts is None:
                 return False
             cls._tts = None
@@ -285,6 +290,8 @@ class IndexTTSBackend:
                 # empty_cache 失败可观察：unload 已置空单例，但显存缓存未清
                 logger.warning("IndexTTS 显存释放失败（empty_cache 异常）: %s", exc)
             return True
+        finally:
+            cls._load_lock.release()
 
     def set_reference_audio(self, path: Path | str | None) -> None:
         """切换参考音频（音色）。接受绝对/相对路径；None 回退默认。"""
